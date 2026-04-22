@@ -36,6 +36,7 @@ export default function App() {
 
   const markersRef = useRef<any[]>([]);
   const historicalResultsRef = useRef<Map<number, SMKResult>>(new Map());
+  const lastJudasRef = useRef(false);
 
   const [isRunning, setIsRunning] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
@@ -53,6 +54,7 @@ export default function App() {
   const [takeProfit, setTakeProfit] = useState(30.0);
   const [speed, setSpeed] = useState(300);
   const [summary, setSummary] = useState({ wins: 0, losses: 0 });
+  const [autoTradeCount, setAutoTradeCount] = useState(0);
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'model', text: string }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -305,11 +307,13 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         }
     }
     if (data.manipulation?.active) {
-        const wasActive = result?.manipulation?.active;
-        if (!wasActive) {
+        if (!lastJudasRef.current) {
             addLog('ev', `JUDAS SWING DETECTED @ ${bar.close.toFixed(5)}`, 'alert');
         }
+        lastJudasRef.current = true;
         markers.push({ time: bar.time as any, position: 'aboveBar', color: '#c05000', shape: 'circle', text: 'JUDAS' });
+    } else {
+        lastJudasRef.current = false;
     }
     if (data.veto?.decision === 'Halt') {
         const lastDecision = result?.veto?.decision;
@@ -344,12 +348,22 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         const hasLong = trades.some(t => t.side === 'buy');
         const hasShort = trades.some(t => t.side === 'sell');
 
-        if (data.execution.direction === 1 && !hasLong) {
-            openTrade('buy', data.execution.stop_loss_price, data.execution.take_profit_price);
-            addLog('tr', `AEGIS ARMED: ${data.execution.reason} -> BUY (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'ok');
-        } else if (data.execution.direction === -1 && !hasShort) {
-            openTrade('sell', data.execution.stop_loss_price, data.execution.take_profit_price);
-            addLog('tr', `AEGIS ARMED: ${data.execution.reason} -> SELL (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'alert');
+        if (autoTradeCount < 4) {
+            if (data.execution.direction === 1 && !hasLong) {
+                openTrade('buy', data.execution.stop_loss_price, data.execution.take_profit_price);
+                addLog('tr', `AUTO-BUY [${autoTradeCount + 1}/4]: ${data.execution.reason} -> BUY (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'ok');
+                setAutoTradeCount(prev => prev + 1);
+            } else if (data.execution.direction === -1 && !hasShort) {
+                openTrade('sell', data.execution.stop_loss_price, data.execution.take_profit_price);
+                addLog('tr', `AUTO-SELL [${autoTradeCount + 1}/4]: ${data.execution.reason} -> SELL (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'alert');
+                setAutoTradeCount(prev => prev + 1);
+            }
+        } else {
+            // Log once when limit reached
+            if (autoTradeCount === 4) {
+                addLog('vt', 'SESSION LIMIT REACHED: 4 AUTO-TRADES COMPLETED', 'warn');
+                setAutoTradeCount(5); // Prevent repeat logs
+            }
         }
     }
 
@@ -532,6 +546,8 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           setTrades([]);
           setHistory([]);
           setSummary({ wins: 0, losses: 0 });
+          setAutoTradeCount(0);
+          lastJudasRef.current = false;
           markersRef.current = [];
           historicalResultsRef.current.clear();
           candleSeriesRef.current?.setData([]);
@@ -1108,7 +1124,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         <button className="btn" onClick={() => setSourceModalOpen(true)}>DATA SOURCE</button>
         <button className="btn" onClick={() => setSettingsOpen(true)}><Settings size={10} className="inline mr-1"/>SETTINGS</button>
         <button className={`btn btn-auto ${autoMode ? 'active' : ''}`} onClick={() => setAutoMode(!autoMode)}>
-          AUTO-MODE {autoMode ? 'ON' : 'OFF'}
+          AUTO-TRADE {autoMode ? 'ON' : 'OFF'} ({Math.min(4, autoTradeCount)}/4)
           <span className={`mcp-pill ${autoMode ? 'active' : ''}`}>MCP_NODE</span>
         </button>
 

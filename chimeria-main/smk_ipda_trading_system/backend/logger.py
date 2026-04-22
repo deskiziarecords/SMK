@@ -52,6 +52,7 @@ _raw_log    = _make_logger("smk.raw",     "raw_bars.log",   max_mb=50)  # full b
 # Trade ID counter — persists for session lifetime
 _trade_counter = 0
 _open_trades: dict = {}   # trade_id → {side, price, lots, symbol, sl, tp}
+_last_judas_status = False # Track for debouncing
 
 
 def _ts() -> str:
@@ -110,10 +111,13 @@ def log_bar(bar_result: dict):
     if amd.get("R_MASTER"):
         events.append("R_MASTER_RESET")
 
-    # Manipulation / Judas swing
+    # Manipulation / Judas swing (Debounced)
+    global _last_judas_status
     manip = bar_result.get("manipulation", {})
-    if manip.get("active"):
+    is_judas = manip.get("active", False)
+    if is_judas and not _last_judas_status:
         events.append(f"JUDAS_SWING score={manip.get('score', 0):.0f} wick={manip.get('wick', 0):.5f}")
+    _last_judas_status = is_judas
 
     # FVGs
     fvg = bar_result.get("fvg", {})
