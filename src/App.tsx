@@ -211,7 +211,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
     let reconnectTimeout: NodeJS.Timeout;
     const connect = () => {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}`;
+        const wsUrl = `ws://localhost:8000`;
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
