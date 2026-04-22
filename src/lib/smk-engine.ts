@@ -222,12 +222,11 @@ export class SMKEngine {
     result.execution = this.updateExecution(result);
 
     // Causal Layer (Placeholders using integrated math)
-    result.causal = {
-        granger: "STABLE",
-        trans_ent: 0.434,
-        ccm_rho: 0.493,
-        spearman: 0.852,
-        decay: Math.exp(-0.08 * 3) // Example tau=3
+    result.causality = {
+        granger: { f_stat: 1.2, p_val: 0.1, significant: false, conf: 0.9, lag: 3 },
+        transfer: { flow: 0.434, threshold: 0.1, significant: true },
+        ccm: { rho: 0.493, convergent: true },
+        spearman: { rho: 0.852, lag: 2, significant: true }
     };
 
     result.sensors = this.getSensorsList(result);
@@ -465,8 +464,8 @@ export class SMKEngine {
   }
 
   private calcExpansion(vd: any, dr: any) {
-    const pPersistence = Math.min(1.0, vd.stasis / 20);
-    const prob = 0.4 * pPersistence; // No news interrupt implementation yet
+    const pPersistence = Math.min(1.0, vd.stasis / 10); // Faster buildup
+    const prob = 0.5 * pPersistence + (vd.entrapped ? 0.3 : 0); 
     return {
       prob,
       entrapped: vd.entrapped,
@@ -693,6 +692,7 @@ export class SMKEngine {
       { id: 's02', name: 'EXPANSION', score: r.expansion?.prob || 0, active: (r.expansion?.prob || 0) > 0.5 },
       { id: 's03', name: 'HARMONIC L3', score: (r.harmonic?.phase_diff || 0) / Math.PI, active: r.harmonic?.inverted || false },
       { id: 's04', name: 'DEAL RANGE', score: r.dealing_range?.coherence || 0, active: true },
+      { id: 's05', name: 'PREM/DISC', score: r.dealing_range?.zone === 'PREMIUM' ? 0.9 : 0.1, active: true },
       { id: 's09', name: 'KL DIVERGE', score: Math.min(1.0, r.kl?.score || 0), active: !r.kl?.stable },
       { id: 's10', name: 'TOPO FRACT', score: (r.topology?.h1_score || 0) / 10, active: r.topology?.fractured || false },
       { id: 's13', name: 'MANIPULATION', score: (r.manipulation?.score || 0) / 100, active: r.manipulation?.active || false },

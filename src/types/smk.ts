@@ -97,12 +97,11 @@ export interface SMKResult {
     islands: number;
     status: string;
   };
-  causal?: {
-    granger: string;
-    trans_ent: number;
-    ccm_rho: number;
-    spearman: number;
-    decay: number;
+  causality?: {
+    granger: { f_stat: number; p_val: number; significant: boolean; conf: number; lag: number };
+    transfer: { flow: number; threshold: number; significant: boolean };
+    ccm: { rho: number; convergent: boolean };
+    spearman: { rho: number; lag: number; significant: boolean };
   };
   amd?: {
     state: string;

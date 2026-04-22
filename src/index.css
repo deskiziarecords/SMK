@@ -1,25 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  --bg: #fff;
-  --bg1: #f4f4f4;
-  --bg2: #ebebeb;
-  --bg3: #e0e0e0;
-  --bg4: #e4e4e4;
-  --b1: #d0d0d0;
-  --b2: #b8b8b8;
-  --b3: #999;
-  --t1: #0a0a0a;
-  --t2: #222;
-  --t3: #444;
-  --t4: #666;
+  --bg: #0d0d0f;
+  --bg0: #050507;
+  --bg1: #141417;
+  --bg2: #1a1a1f;
+  --bg3: #222228;
+  --bg4: #2a2a32;
+  --b1: #1f1f25;
+  --b2: #2a2a32;
+  --b3: #3f3f4a;
+  --t1: #f0f0f0;
+  --t2: #d0d0d0;
+  --t3: #a0a0a0;
+  --t4: #707070;
+  --ac: #2563eb;
+  --ac2: #1d4ed8;
   --alert: #c05000;
-  --alert-bg: #fff7f0;
+  --alert-bg: #1a0a00;
   --alert-b: #f5b060;
-  --up: #1a6335;
-  --down: #8f1f1f;
-  --up-bg: #f0f8f3;
-  --down-bg: #fdf0f0;
+  --up: #10b981;
+  --down: #ef4444;
+  --up-bg: #064e3b33;
+  --down-bg: #7f1d1d33;
 }
 
 body {
@@ -570,15 +573,15 @@ body {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 200px;
+  height: 280px;
   background: var(--bg0);
-  border-top: 2px solid #2563eb;
-  z-index: 9999;
+  border-top: 1px solid var(--b3);
+  z-index: 10000;
   transform: translateY(100%);
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
   display: flex;
   flex-direction: column;
-  box-shadow: 0 -10px 25px -5px rgba(0, 0, 0, 0.1), 0 -8px 10px -6px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 -15px 40px rgba(0, 0, 0, 0.6);
 }
 
 .ai-drawer-open {
@@ -641,13 +644,14 @@ body {
 
 .ai-chat-input {
   flex: 1;
-  background: var(--bg1);
+  background: rgba(255,255,255,0.02);
   border: 1px solid var(--b2);
-  padding: 2px 6px;
-  font-size: 9px;
+  padding: 6px 10px;
+  font-size: 10px;
   font-family: var(--font-mono);
   color: var(--t1);
   outline: none;
+  transition: border-color 0.2s;
 }
 
 .ai-chat-input:focus { border-color: #2563eb; }

@@ -2,8 +2,17 @@
 realtime.py — Live candle streaming via Bitget REST polling + WebSocket broadcast.
 Polls Bitget every N seconds, runs SMK detectors, streams to all connected frontends.
 """
-import asyncio, json, time, httpx
-from typing import Set, Optional, Dict, Any
+import asyncio
+import json
+import time
+import httpx
+from typing import Set, Optional, Any
+
+try:
+    from logger import log_bar, log_session
+except ImportError:
+    def log_bar(r): pass
+    def log_session(m): print(m)
 
 # ── BITGET CANDLE GRANULARITIES ───────────────────────────────────────────────
 GRAN_MAP = {
@@ -20,21 +29,21 @@ class LiveFeed:
     broadcasts bar payloads to all subscribed WebSocket clients.
     """
     def __init__(self):
-        self.clients:    Set[Any]  = set()   # WebSocket connections
-        self.running:    bool      = False
-        self.symbol:     str       = "EURUSDT"
-        self.granularity:str       = "1m"
-        self.api_key:    str       = ""
-        self.last_ts:    int       = 0       # timestamp of last processed candle
-        self.pipeline:   Any       = None    # SMKPipeline instance
-        self.task:       Optional[asyncio.Task] = None
+        self.clients: Set[Any] = set()
+        self.running: bool = False
+        self.symbol: str = "EURUSDT"
+        self.granularity: str = "1m"
+        self.api_key: str = ""
+        self.last_ts: int = 0
+        self.pipeline: Any = None
+        self.task: Optional[asyncio.Task] = None
 
     def configure(self, symbol: str, granularity: str, api_key: str, pipeline):
-        self.symbol      = symbol.upper()
+        self.symbol = symbol.upper()
         self.granularity = granularity
-        self.api_key     = api_key
-        self.pipeline    = pipeline
-        self.last_ts     = 0
+        self.api_key = api_key
+        self.pipeline = pipeline
+        self.last_ts = 0
 
     def add_client(self, ws):
         self.clients.add(ws)
@@ -56,9 +65,9 @@ class LiveFeed:
         gran_str, _ = GRAN_MAP.get(self.granularity, ("1min", 60))
         url = "https://api.bitget.com/api/v2/spot/market/candles"
         params = {
-            "symbol":      self.symbol,
+            "symbol": self.symbol,
             "granularity": gran_str,
-            "limit":       str(limit),
+            "limit": str(limit),
         }
         headers = {}
         if self.api_key:
@@ -74,13 +83,13 @@ class LiveFeed:
 
         bars = []
         for c in data.get("data", []):
-            ts = int(c[0]) // 1000  # ms → seconds
+            ts = int(c[0]) // 1000
             bars.append({
-                "time":   ts,
-                "open":   float(c[1]),
-                "high":   float(c[2]),
-                "low":    float(c[3]),
-                "close":  float(c[4]),
+                "time": ts,
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
                 "volume": float(c[5]),
             })
         bars.sort(key=lambda b: b["time"])
@@ -103,12 +112,11 @@ class LiveFeed:
         """Main polling loop — checks for new closed candle every ~5s."""
         self.running = True
         _, poll_interval = GRAN_MAP.get(self.granularity, ("1min", 60))
-        # Poll every 5 seconds (check if a new candle has closed)
         check_interval = 5
 
         print(f"[LIVE] Starting feed: {self.symbol} {self.granularity} poll={check_interval}s")
+        log_session(f"LIVE FEED START: {self.symbol} {self.granularity}")
 
-        # Bootstrap
         ok = await self._bootstrap()
         if not ok:
             await self.broadcast({"type": "error", "message": "Failed to fetch initial candles from Bitget"})
@@ -118,33 +126,29 @@ class LiveFeed:
         while self.running:
             await asyncio.sleep(check_interval)
             if not self.clients:
-                continue  # no one listening, skip
+                continue
 
             try:
                 bars = await self.fetch_candles(limit=5)
                 if not bars:
                     continue
 
-                # Find candles newer than last processed
                 new_bars = [b for b in bars if b["time"] > self.last_ts]
 
                 for bar in new_bars:
-                    # Skip the very latest candle — it may still be open/forming
-                    # Only process candles that are at least poll_interval seconds old
                     age = int(time.time()) - bar["time"]
                     if age < poll_interval - 2:
-                        continue  # candle still forming
+                        continue
 
-                    # Append to pipeline history
                     self.pipeline.raw_bars.append(bar)
                     self.pipeline.cursor = len(self.pipeline.raw_bars) - 1
 
-                    # Run SMK detectors
                     try:
                         result = self.pipeline.step()
                         if result:
                             result["live"] = True
                             result["symbol"] = self.symbol
+                            log_bar(result)
                             await self.broadcast({"type": "bar", "data": result})
                     except Exception as step_err:
                         print(f"[LIVE] Step error: {step_err}")
@@ -156,7 +160,7 @@ class LiveFeed:
             except Exception as e:
                 print(f"[LIVE] Poll error: {e}")
                 await self.broadcast({"type": "error", "message": f"Feed error: {e}"})
-                await asyncio.sleep(15)  # backoff
+                await asyncio.sleep(15)
 
         self.running = False
         print("[LIVE] Feed stopped")

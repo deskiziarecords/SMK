@@ -47,9 +47,9 @@ class IPDAExpansionPredictor:
             self.timer = 0
 
         # 2. Probability Scoring (P_amp)
-        # Weighting: 40% Persistence, 60% News Catalyst (System Interrupt) [9]
+        # Weighting: 80% Persistence, 20% News Catalyst (System Interrupt)
         p_persistence = min(1.0, self.timer / self.tau_max)
-        p_amp = (0.4 * p_persistence) + (0.6 * (1.0 if news_interrupt else 0.0))
+        p_amp = (0.8 * p_persistence) + (0.2 * (1.0 if news_interrupt else 0.0))
 
         # 3. Check for Displacement (λ6 Veto check for early activation) [12, 13]
         last_candle = ohlcv_window.iloc[-1]

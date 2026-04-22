@@ -66,7 +66,8 @@ class CCMEngine:
             y_hat.append(self.simplex_projection(Mx, Y_aligned, Mx[i]))
             
         # 3. Convergence Testing (Correlation of Y and Y_hat)
-        rho = np.corrcoef(Y_aligned[:len(y_hat)], y_hat)[4]
+        rho_mat = np.corrcoef(Y_aligned[:len(y_hat)], y_hat)
+        rho = rho_mat[0, 1] if rho_mat.shape == (2, 2) else 0.0
         
         # Logic: If rho increases with library size L, causality is confirmed.
         # (Simplified static check for PoC)

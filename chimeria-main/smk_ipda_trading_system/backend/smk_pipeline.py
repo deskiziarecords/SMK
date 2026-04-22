@@ -40,6 +40,32 @@ import numpy as np
 import pandas as pd
 from typing import List, Dict, Optional
 
+# Plugin system — lazy load to avoid circular imports
+_plugin_mgr = None
+def _get_plugins():
+    global _plugin_mgr
+    if _plugin_mgr is None:
+        try:
+            from plugin_manager import get_plugin_manager
+            _plugin_mgr = get_plugin_manager()
+        except Exception as e:
+            print(f"[SMK] Plugin manager not available: {e}")
+            _plugin_mgr = None
+    return _plugin_mgr
+
+# AEGIS bridge — lazy load
+_aegis_bridge = None
+def _get_bridge():
+    global _aegis_bridge
+    if _aegis_bridge is None:
+        try:
+            from aegis_bridge import get_bridge
+            _aegis_bridge = get_bridge()
+        except Exception as e:
+            print(f"[SMK] AEGIS bridge not available: {e}")
+            _aegis_bridge = None
+    return _aegis_bridge
+
 
 class SMKPipeline:
     def __init__(self):
@@ -78,6 +104,13 @@ class SMKPipeline:
         try_load('fusion',       lambda: _imp('lambda_fusion_engine', 'LambdaFusionEngine')())
         try_load('mandra',       lambda: _imp('risk.mandra_kernels', 'MandraGate')())
         try_load('topology',     lambda: _imp('detectors.topological_fracture_detector', 'TopologicalFractureDetector')())
+        
+        # Causality Engines
+        try_load('granger',      lambda: _imp('causality.granger_causality', 'GrangerCausalityDetector')())
+        try_load('transfer',     lambda: _imp('causality.transfer_entropy', 'TransferEntropyEngine')())
+        try_load('ccm',          lambda: _imp('causality.ccm_engine', 'CCMEngine')())
+        try_load('spearman',     lambda: _imp('causality.spearman_lag_engine', 'SpearmanLagEngine')())
+        
         ok = [k for k, v in self.modules.items() if v is not None]
         bad = self._import_errors
         if bad:
@@ -88,6 +121,20 @@ class SMKPipeline:
     def load_bars(self, bars):
         self.raw_bars = bars
         self.cursor = 0
+        # Reset plugin warmup counters
+        try:
+            mgr = _get_plugins()
+            if mgr: mgr.reset()
+        except Exception:
+            pass
+        # Pre-warm AEGIS bridge ATR with initial bars
+        try:
+            bridge = _get_bridge()
+            if bridge:
+                for b in bars[:50]:
+                    bridge.update_atr(b)
+        except Exception:
+            pass
         self.amd_state = 'Accumulation'
         self.prev_energy = 0.0
         self.stasis_timer = 0
@@ -120,6 +167,12 @@ class SMKPipeline:
         if len(window) < 3:
             return self._blank(self.raw_bars[idx], idx)
         df = _to_df(window)
+        # Standard Indicators for modules
+        if len(df) >= 14:
+            df['atr'] = (df['high'] - df['low']).rolling(14).mean().ffill().bfill()
+        else:
+            df['atr'] = (df['high'] - df['low']).mean()
+            
         cur = self.raw_bars[idx]
         r = {'bar': cur, 'bar_index': idx, 'total_bars': len(self.raw_bars)}
         r['dealing_range'] = self._dealing_range(df)
@@ -138,11 +191,76 @@ class SMKPipeline:
         r['manipulation']  = self._manipulation(df)
         r['kl']            = self._kl(df)
         r['topology']      = self._topology(df)
+        r['causality']     = self._causality(df)
         r['amd']           = self._amd(r)
         r['fusion']        = self._fusion(r)
         r['mandra']        = self._mandra(r)
         r['veto']          = self._veto(r)
         r['sensors']       = self._sensors(r)
+
+        # ── Plugin layer ──────────────────────────────────────────────────────
+        try:
+            mgr = _get_plugins()
+            if mgr:
+                # Build a minimal DataFrame for plugins from the current window
+                window = self.raw_bars[max(0, idx-59):idx+1]
+                import pandas as _pd
+                df_plugin = _pd.DataFrame(window)
+                if 'time' in df_plugin.columns:
+                    df_plugin['datetime'] = _pd.to_datetime(df_plugin['time'], unit='s', utc=True)
+                    df_plugin = df_plugin.set_index('datetime')
+                for col in ['open','high','low','close','volume']:
+                    if col in df_plugin.columns:
+                        df_plugin[col] = _pd.to_numeric(df_plugin[col], errors='coerce').fillna(0)
+                df_plugin['atr'] = (df_plugin['high']-df_plugin['low']).rolling(14).mean().fillna(
+                    (df_plugin['high']-df_plugin['low']).mean())
+                df_plugin['atr20'] = (df_plugin['high']-df_plugin['low']).rolling(20).mean().fillna(
+                    (df_plugin['high']-df_plugin['low']).mean())
+
+                plugin_results = mgr.run(cur, df_plugin, r)
+                r['plugins'] = plugin_results
+                # Append plugin sensors to sensor list
+                r['sensors'] += mgr.to_sensor_rows(plugin_results)
+        except Exception as _pe:
+            r['plugins'] = {}
+
+        # ── AEGIS Execution Bridge ────────────────────────────────────────────
+        try:
+            bridge = _get_bridge()
+            if bridge:
+                # Feed ATR on every bar regardless of veto
+                bridge.update_atr(cur)
+                # Only run full evaluation on PROCEED bars
+                if r['veto']['decision'] == 'Proceed':
+                    exe = bridge.evaluate(r, self.raw_bars[:idx+1])
+                    r['execution'] = exe
+                else:
+                    r['execution'] = {
+                        "action": "HALT",
+                        "reason": r['veto']['decision'],
+                        "is_armed": False,
+                        "lot_size": 0.0,
+                        "stop_loss_price": 0.0,
+                        "take_profit_price": 0.0,
+                        "kelly_size": 0.0,
+                        "pattern": "",
+                        "dominant": "X",
+                        "direction": 0,
+                        "venue_allocation": [],
+                        "risk_profile": "",
+                        "risk_pips": 0.0,
+                        "rr_ratio": 0.0,
+                        "delta_e": 0.0,
+                        "rev_score": 0.0,
+                    }
+        except Exception as _be:
+            r['execution'] = {"action": "HALT", "reason": str(_be), "is_armed": False,
+                              "lot_size": 0.0, "stop_loss_price": 0.0,
+                              "take_profit_price": 0.0, "kelly_size": 0.0,
+                              "pattern": "", "dominant": "X", "direction": 0,
+                              "venue_allocation": [], "risk_profile": "", "risk_pips": 0.0,
+                              "rr_ratio": 0.0, "delta_e": 0.0, "rev_score": 0.0}
+
         return _sanitize(r)
 
     def _dealing_range(self, df):
@@ -374,6 +492,62 @@ class SMKPipeline:
         return {'h1_score': round(min(score, 10.0), 3), 'fractured': score > 5.0,
                 'islands': int(score / 2), 'status': 'COMPACT_CLOUD' if score < 5.0 else 'GEOMETRY_FRACTURE'}
 
+    def _causality(self, df):
+        """Integrated Causality Analysis: Granger, TE, CCM, Spearman."""
+        res = {
+            'granger': {'significant': False, 'p_value': 1.0, 'lag': 0, 'conf': 0.0},
+            'transfer': {'flow': 0.0, 'p_value': 1.0, 'significant': False},
+            'ccm': {'rho': 0.0, 'convergent': False},
+            'spearman': {'rho': 0.0, 'lag': 0, 'significant': False}
+        }
+        if len(df) < 30: return res
+        
+        # Target: Price, Lead Candidate: Volume or typical price
+        target = df['close'].values
+        lead = df['volume'].values
+        
+        # Normalize for numerical stability
+        lead_norm = (lead - np.mean(lead)) / (np.std(lead) + 1e-9)
+        target_norm = (target - np.mean(target)) / (np.std(target) + 1e-9)
+        
+        # 1. Granger
+        m_g = self.modules.get('granger')
+        if m_g:
+            try:
+                df_c = pd.DataFrame({'lead': lead_norm, 'target': target_norm})
+                t = m_g.compute_causality(df_c, 'lead', 'target')
+                res['granger'] = {'significant': bool(t.is_significant), 'p_value': float(t.p_value), 
+                                 'lag': int(t.optimal_lag_p), 'conf': float(t.bootstrap_conf)}
+            except: pass
+            
+        # 2. Transfer Entropy
+        m_t = self.modules.get('transfer')
+        if m_t:
+            try:
+                t = m_t.analyze_dependency(lead_norm, target_norm)
+                res['transfer'] = {'flow': float(t.net_flow), 'p_value': float(t.p_value), 
+                                  'significant': bool(t.is_significant)}
+            except: pass
+            
+        # 3. CCM
+        m_c = self.modules.get('ccm')
+        if m_c:
+            try:
+                t = m_c.compute_causality(lead_norm, target_norm)
+                res['ccm'] = {'rho': float(t.rho_score), 'convergent': bool(t.is_convergent)}
+            except: pass
+            
+        # 4. Spearman
+        m_s = self.modules.get('spearman')
+        if m_s:
+            try:
+                t = m_s.analyze_lead_lag(pd.Series(lead_norm), pd.Series(target_norm))
+                res['spearman'] = {'rho': float(t.peak_rho), 'lag': int(t.optimal_lag), 
+                                  'significant': bool(t.is_significant)}
+            except: pass
+            
+        return res
+
     def _amd(self, r):
         prev = self.amd_state
         R_MASTER = not r['kl']['stable'] and r['topology']['fractured']
@@ -464,12 +638,13 @@ class SMKPipeline:
         dr = r['dealing_range']; di = r['displacement']; fv = r['fvg']
         ob = r['ob']; kl = r['kl']; tp = r['topology']
         ma = r['mandra']; se = r['session']; mn = r['manipulation']; sw = r['swings']
+        ca = r['causality']
         return [
             {'id': 's01', 'name': 'PHASE ENTRAP',  'score': vd['ratio'],                     'active': vd['entrapped']},
             {'id': 's02', 'name': 'EXPANSION',      'score': ex['prob'],                      'active': ex['prob'] > 0.5},
             {'id': 's03', 'name': 'HARMONIC L3',    'score': min(1, ha['phase_diff'] / 3.14), 'active': ha['inverted']},
             {'id': 's04', 'name': 'DEAL RANGE',     'score': dr['coherence'],                 'active': True},
-            {'id': 's05', 'name': 'PREM/DISC',      'score': 0.9,                             'active': dr['zone'] != 'NEUTRAL'},
+            {'id': 's05', 'name': 'PREM/DISC',      'score': 1.0 if dr['zone'] == 'PREMIUM' else (0.1 if dr['zone'] == 'DISCOUNT' else 0.5), 'active': dr['zone'] != 'NEUTRAL'},
             {'id': 's06', 'name': 'DISPLACEMENT',   'score': di['body_ratio'],                'active': di['is_disp']},
             {'id': 's07', 'name': 'FVG DETECT',     'score': min(1, fv['count'] / 5),         'active': fv['active']},
             {'id': 's08', 'name': 'ORDER BLOCK',    'score': min(1, ob['count'] / 5),         'active': ob['active']},
@@ -479,6 +654,12 @@ class SMKPipeline:
             {'id': 's12', 'name': 'SESSION L2',     'score': se['score'],                     'active': se['killzone']},
             {'id': 's13', 'name': 'MANIPULATION',   'score': mn['score'] / 100,               'active': mn['active']},
             {'id': 's14', 'name': 'SWING NODES',    'score': min(1, sw['count'] / 10),        'active': sw['count'] > 0},
+            
+            # Causality Sensors
+            {'id': 'c01', 'name': 'GRANGER ρ',      'score': ca['granger']['conf'],           'active': ca['granger']['significant']},
+            {'id': 'c02', 'name': 'TRANS ENT',      'score': min(1.0, ca['transfer']['flow'] * 10), 'active': ca['transfer']['significant']},
+            {'id': 'c03', 'name': 'CCM ρ',          'score': ca['ccm']['rho'],                'active': ca['ccm']['convergent']},
+            {'id': 'c04', 'name': 'SPEARMAN τ',     'score': ca['spearman']['rho'],           'active': ca['spearman']['significant']},
         ]
 
     def _blank(self, bar, idx):
@@ -509,6 +690,13 @@ class SMKPipeline:
             'mandra':       {'open': True, 'delta_e': 0.0, 'size': 0.0, 'regime_stable': True, 'status': 'INIT'},
             'veto':         {'decision': 'Proceed', 'reasons': [], 'trade_allowed': True},
             'sensors':      blank_s,
+            'execution':    {'action': 'WARMUP', 'is_armed': False, 'lot_size': 0.0,
+                             'stop_loss_price': 0.0, 'take_profit_price': 0.0,
+                             'kelly_size': 0.0, 'pattern': '', 'dominant': 'X',
+                             'direction': 0, 'venue_allocation': [], 'risk_profile': '',
+                             'risk_pips': 0.0, 'rr_ratio': 0.0, 'delta_e': 0.0,
+                             'rev_score': 0.0, 'reason': 'WARMUP'},
+            'plugins':      {},
         }
 
 

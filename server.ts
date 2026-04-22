@@ -44,7 +44,7 @@ async function startServer() {
       if (!data.data) throw new Error(data.msg || 'No data from Bitget');
       
       const bars: OHLCV[] = data.data.map((c: any) => ({
-        time: parseInt(c[0]) / 1000,
+        time: Math.floor(parseInt(c[0]) / 1000),
         open: parseFloat(c[1]),
         high: parseFloat(c[2]),
         low: parseFloat(c[3]),
@@ -52,9 +52,10 @@ async function startServer() {
         volume: parseFloat(c[5])
       })).sort((a: any, b: any) => a.time - b.time);
 
-      engine.loadBars(bars);
+      const uniqueBars = bars.filter((b, i, self) => i === 0 || b.time > self[i - 1].time);
+      engine.loadBars(uniqueBars);
       const snapshot = engine.getSnapshot(100);
-      res.json({ status: 'ok', count: bars.length, source: `bitget:${symbol}`, snapshot });
+      res.json({ status: 'ok', count: uniqueBars.length, source: `bitget:${symbol}`, snapshot });
     } catch (err: any) {
       res.status(500).json({ status: 'error', message: err.message });
     }
@@ -103,9 +104,11 @@ async function startServer() {
       }
 
       const sortedBars = bars.sort((a, b) => a.time - b.time);
-      engine.loadBars(sortedBars);
+      const uniqueBars = sortedBars.filter((b, i, self) => i === 0 || b.time > self[i - 1].time);
+      
+      engine.loadBars(uniqueBars);
       const snapshot = engine.getSnapshot(100);
-      res.json({ status: 'ok', count: sortedBars.length, snapshot });
+      res.json({ status: 'ok', count: uniqueBars.length, snapshot });
     } catch (err: any) {
       res.status(500).json({ status: 'error', message: err.message });
     }

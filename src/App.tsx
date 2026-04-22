@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { GoogleGenAI } from "@google/genai";
 import { SMKResult } from './types/smk';
-import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown } from 'lucide-react';
+import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3 } from 'lucide-react';
 
 const MODULE_DEFS = [
   {id:'bias',        name:'Bias Detector',       layer:'L1'},
@@ -46,6 +46,8 @@ export default function App() {
   const [trades, setTrades] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [realizedPnl, setRealizedPnl] = useState(0);
+  const [profitTargetEnabled, setProfitTargetEnabled] = useState(false);
+  const [profitTargetPct, setProfitTargetPct] = useState(2); // 2%
   const [lotSize, setLotSize] = useState(0.01);
   const [stopLoss, setStopLoss] = useState(15.0);
   const [takeProfit, setTakeProfit] = useState(30.0);
@@ -57,12 +59,17 @@ export default function App() {
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const [hoverData, setHoverData] = useState<SMKResult | null>(null);
+  const lastProcessedTimeRef = useRef<number>(0);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
-  const [viewMode, setViewMode] = useState<'chart' | 'matrix'>('chart');
+  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality'>('chart');
   const [aiOpen, setAiOpen] = useState(false);
+  const [causalGraph, setCausalGraph] = useState<any>(null);
+  
+  const slLineRef = useRef<any>(null);
+  const tpLineRef = useRef<any>(null);
 
   const [moduleStates, setModuleStates] = useState<Record<string, boolean>>(
     Object.fromEntries(MODULE_DEFS.map(m => [m.id, true]))
@@ -232,6 +239,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
               volumeSeriesRef.current?.setData([]);
               setResult(null);
               setLogs([]);
+              lastProcessedTimeRef.current = 0;
           }
         };
 
@@ -263,18 +271,26 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
   };
 
   const processBar = (data: SMKResult) => {
-    setResult(data);
-    historicalResultsRef.current.set(data.bar.time, data);
     const bar = data.bar;
+    const time = Math.floor(Number(bar.time));
+    
+    if (time < lastProcessedTimeRef.current) {
+        return;
+    }
+    lastProcessedTimeRef.current = time;
+
+    setResult(data);
+    historicalResultsRef.current.set(time, data);
+
     candleSeriesRef.current?.update({
-      time: bar.time as any,
+      time: time as any,
       open: bar.open,
       high: bar.high,
       low: bar.low,
       close: bar.close
     });
     volumeSeriesRef.current?.update({
-      time: bar.time as any,
+      time: time as any,
       value: bar.volume,
       color: bar.close >= bar.open ? '#237a4522' : '#aa282822'
     });
@@ -319,18 +335,59 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         candleSeriesRef.current?.setMarkers(markersRef.current);
     }
 
+    if (data.causality) {
+        setCausalGraph(data.causality);
+    }
+
     // Auto Mode execution
-    if (autoMode && data.execution?.action === 'PROCEED') {
+    if (autoMode && (data.execution?.action === 'TRADE' || data.execution?.action === 'PROCEED')) {
         const hasLong = trades.some(t => t.side === 'buy');
         const hasShort = trades.some(t => t.side === 'sell');
 
         if (data.execution.direction === 1 && !hasLong) {
-            openTrade('buy');
-            addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> BUY`, 'ok');
+            openTrade('buy', data.execution.stop_loss_price, data.execution.take_profit_price);
+            addLog('tr', `AEGIS ARMED: ${data.execution.reason} -> BUY (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'ok');
         } else if (data.execution.direction === -1 && !hasShort) {
-            openTrade('sell');
-            addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> SELL`, 'alert');
+            openTrade('sell', data.execution.stop_loss_price, data.execution.take_profit_price);
+            addLog('tr', `AEGIS ARMED: ${data.execution.reason} -> SELL (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'alert');
         }
+    }
+
+    // Price Line Updates (Execution Levels)
+    if (data.execution?.is_armed && data.execution.stop_loss_price > 0) {
+        if (!slLineRef.current && candleSeriesRef.current) {
+            slLineRef.current = candleSeriesRef.current.createPriceLine({
+                price: data.execution.stop_loss_price,
+                color: 'var(--down)',
+                lineWidth: 1,
+                lineStyle: 3, // Dashed
+                axisLabelVisible: true,
+                title: 'STOP LOSS',
+            });
+        } else if (slLineRef.current) {
+            slLineRef.current.applyOptions({ price: data.execution.stop_loss_price });
+        }
+    } else if (slLineRef.current && candleSeriesRef.current) {
+        candleSeriesRef.current.removePriceLine(slLineRef.current);
+        slLineRef.current = null;
+    }
+
+    if (data.execution?.is_armed && data.execution.take_profit_price > 0) {
+        if (!tpLineRef.current && candleSeriesRef.current) {
+            tpLineRef.current = candleSeriesRef.current.createPriceLine({
+                price: data.execution.take_profit_price,
+                color: 'var(--up)',
+                lineWidth: 1,
+                lineStyle: 3, // Dashed
+                axisLabelVisible: true,
+                title: 'TAKE PROFIT',
+            });
+        } else if (tpLineRef.current) {
+            tpLineRef.current.applyOptions({ price: data.execution.take_profit_price });
+        }
+    } else if (tpLineRef.current && candleSeriesRef.current) {
+        candleSeriesRef.current.removePriceLine(tpLineRef.current);
+        tpLineRef.current = null;
     }
 
     if (autoMode && data.execution?.action === 'HALT' && trades.length > 0) {
@@ -383,6 +440,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 candleSeriesRef.current?.setData(candleData);
                 volumeSeriesRef.current?.setData(volumeData);
                 setResult(results[results.length - 1]);
+                lastProcessedTimeRef.current = Math.floor(Number(results[results.length - 1].bar.time));
                 results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
             }
 
@@ -423,6 +481,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
             candleSeriesRef.current?.setData(candleData);
             volumeSeriesRef.current?.setData(volumeData);
             setResult(results[results.length - 1]);
+            lastProcessedTimeRef.current = Math.floor(Number(results[results.length - 1].bar.time));
             results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
             setTimeout(() => {
               chartRef.current?.timeScale().fitContent();
@@ -463,15 +522,25 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           volumeSeriesRef.current?.setData([]);
           setResult(null);
           setLogs([]);
+          lastProcessedTimeRef.current = 0;
       }
   };
 
-  const openTrade = (side: 'buy' | 'sell') => {
+  const openTrade = (side: 'buy' | 'sell', sl_price?: number, tp_price?: number) => {
       if (!result) return;
       const price = result.bar.close;
       const id = Date.now();
-      setTrades(prev => [...prev, { id, side, price, lots: lotSize, sl: stopLoss, tp: takeProfit }]);
-      addLog('tr', `OPEN ${side.toUpperCase()} ${lotSize} @ ${price.toFixed(5)} [SL:${stopLoss} TP:${takeProfit}]`, side === 'buy' ? 'ok' : 'alert');
+      
+      // Calculate SL/TP in pips for the monitor, or use defaults
+      const sl = sl_price ? Math.abs(price - sl_price) * 10000 : stopLoss;
+      const tp = tp_price ? Math.abs(price - tp_price) * 10000 : takeProfit;
+
+      setTrades(prev => [...prev, { 
+          id, side, price, lots: lotSize, 
+          sl, tp, 
+          venue: result.execution?.venue_allocation?.[0] || 'DEFAULT'
+      }]);
+      addLog('tr', `OPEN ${side.toUpperCase()} ${lotSize} @ ${price.toFixed(5)} [SL:${sl.toFixed(1)} TP:${tp.toFixed(1)}]`, side === 'buy' ? 'ok' : 'alert');
   };
 
   const closeTrade = (id: number) => {
@@ -510,10 +579,33 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
   const buySignal = result && (result.fusion?.p_fused || 0) > 0.45 && (result.fusion?.confidence || 0) > 0.6 && result.veto?.decision === 'Proceed';
   const sellSignal = result && (result.fusion?.p_fused || 0) < -0.45 && (result.fusion?.confidence || 0) > 0.6 && result.veto?.decision === 'Proceed';
+  
+  // Auto-close on opposing signal (Flip)
+  useEffect(() => {
+     if (autoMode && result) {
+        if (buySignal) {
+           trades.filter(t => t.side === 'sell').forEach(t => closeTrade(t.id));
+        }
+        if (sellSignal) {
+           trades.filter(t => t.side === 'buy').forEach(t => closeTrade(t.id));
+        }
+     }
+  }, [buySignal, sellSignal, autoMode, result]);
+
   const closeSignal = trades.length > 0 && (result?.veto?.decision === 'Halt' || (openPnlProfit > 10));
 
   const netPnl = realizedPnl + openPnlProfit;
   const winRate = (summary.wins + summary.losses) > 0 ? (summary.wins / (summary.wins + summary.losses) * 100).toFixed(0) + '%' : '--%';
+  const initialBalance = 10000;
+  const currentReturnPct = (netPnl / initialBalance) * 100;
+
+  useEffect(() => {
+    if (profitTargetEnabled && currentReturnPct >= profitTargetPct && trades.length > 0) {
+      addLog('ev', `TARGET REACHED: ${currentReturnPct.toFixed(2)}% | Closing all...`, 'ok');
+      // Programmatic closure
+      trades.forEach(t => closeTrade(t.id));
+    }
+  }, [currentReturnPct, profitTargetEnabled, profitTargetPct, trades]);
 
   const toggleModule = (id: string) => {
     setModuleStates(prev => ({ ...prev, [id]: !prev[id] }));
@@ -637,6 +729,13 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 <LayoutGrid size={12} />
             </button>
             <button 
+                className={`btn ${viewMode === 'causality' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                onClick={() => setViewMode('causality')}
+                title="Causality Manifold"
+            >
+                <Activity size={12} />
+            </button>
+            <button 
                 className={`btn ${aiOpen ? 'bg-blue-100 border-blue-400' : ''}`}
                 onClick={() => setAiOpen(!aiOpen)}
                 title="AI Core"
@@ -646,6 +745,15 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         </div>
         
         <div className="tb-r">
+          <label className="flex items-center gap-2 cursor-pointer hover:bg-white/5 px-2 py-1 rounded transition-colors mr-2">
+            <input 
+              type="checkbox" 
+              className="w-3 h-3 accent-blue-500" 
+              checked={profitTargetEnabled} 
+              onChange={(e) => setProfitTargetEnabled(e.target.checked)}
+            />
+            <span className="text-[10px] text-gray-400 font-mono">AUTO-CLOSE 2%</span>
+          </label>
           <span className={`pill ${wsStatus === 'LIVE' ? 'p-ok' : wsStatus === 'PAUSED' ? 'p-warn' : 'p-alert'} flex items-center gap-1.5`}>
             <div className={`status-dot ${wsStatus === 'LIVE' ? 'sd-live' : wsStatus === 'PAUSED' ? 'sd-paused' : 'sd-off'}`} />
             WS:{wsStatus}
@@ -744,6 +852,80 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                         </div>
                     ))}
                     {isRunning && <div className="matrix-cell animate-pulse border-l-2 border-zinc-400 font-bold">_</div>}
+                </div>
+            </div>
+          )}
+
+          {viewMode === 'causality' && (
+            <div className="causality-view p-4 bg-zinc-50 overflow-y-auto">
+                <div className="flex items-center gap-2 mb-4">
+                    <Activity className="text-blue-600" size={16} />
+                    <h3 className="font-bold text-sm tracking-tight text-zinc-800">LEAD-LAG CAUSALITY MANIFOLD</h3>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* GRANGER */}
+                    <div className="bg-white p-3 border border-zinc-200 rounded shadow-sm">
+                        <div className="text-[10px] text-zinc-400 font-mono mb-1">λ7 / GRANGER F-TEST</div>
+                        <div className="flex justify-between items-end">
+                            <div className="text-xl font-bold text-zinc-900">
+                                {causalGraph?.granger?.conf ? (causalGraph.granger.conf * 100).toFixed(0) : 0}%
+                            </div>
+                            <div className={`text-[10px] px-1 rounded ${causalGraph?.granger?.significant ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                                {causalGraph?.granger?.significant ? 'CAUSAL' : 'STOCHASTIC'}
+                            </div>
+                        </div>
+                        <div className="text-[9px] text-zinc-500 mt-2 font-mono">OPTIMAL LAG τ = {causalGraph?.granger?.lag || 0}</div>
+                    </div>
+
+                    {/* TRANSFER ENTROPY */}
+                    <div className="bg-white p-3 border border-zinc-200 rounded shadow-sm">
+                        <div className="text-[10px] text-zinc-400 font-mono mb-1">λ-TE / INFORMATION FLOW</div>
+                        <div className="flex justify-between items-end">
+                            <div className="text-xl font-bold text-zinc-900">
+                                {causalGraph?.transfer?.flow ? causalGraph.transfer.flow.toFixed(4) : "0.0000"}
+                            </div>
+                            <div className={`text-[10px] px-1 rounded ${causalGraph?.transfer?.significant ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                                {causalGraph?.transfer?.significant ? 'DIR-FLOW' : 'EQUILIBRIUM'}
+                            </div>
+                        </div>
+                        <div className="text-[9px] text-zinc-500 mt-2 font-mono">MM-CORRECTED ENTROPY</div>
+                    </div>
+
+                    {/* CCM */}
+                    <div className="bg-white p-3 border border-zinc-200 rounded shadow-sm">
+                        <div className="text-[10px] text-zinc-400 font-mono mb-1">λ-CCM / SHADOW MANIFOLD</div>
+                        <div className="flex justify-between items-end">
+                            <div className="text-xl font-bold text-zinc-900">
+                                {causalGraph?.ccm?.rho ? causalGraph.ccm.rho.toFixed(3) : "0.000"}
+                            </div>
+                            <div className={`text-[10px] px-1 rounded ${causalGraph?.ccm?.convergent ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                                {causalGraph?.ccm?.convergent ? 'CONVERGENT' : 'DIVERGENT'}
+                            </div>
+                        </div>
+                        <div className="text-[9px] text-zinc-500 mt-2 font-mono">ρ SKILL (TAKENS EMBEDDING)</div>
+                    </div>
+
+                    {/* SPEARMAN */}
+                    <div className="bg-white p-3 border border-zinc-200 rounded shadow-sm">
+                        <div className="text-[10px] text-zinc-400 font-mono mb-1">λ-RANK / SPEARMAN τ</div>
+                        <div className="flex justify-between items-end">
+                            <div className="text-xl font-bold text-zinc-900">
+                                {causalGraph?.spearman?.rho ? causalGraph.spearman.rho.toFixed(3) : "0.000"}
+                            </div>
+                            <div className={`text-[10px] px-1 rounded ${causalGraph?.spearman?.significant ? 'bg-emerald-100 text-emerald-700' : 'bg-zinc-100 text-zinc-400'}`}>
+                                {causalGraph?.spearman?.significant ? 'MONOTONIC' : 'DRIFT'}
+                            </div>
+                        </div>
+                        <div className="text-[9px] text-zinc-500 mt-2 font-mono">PEAK LAG τ = {causalGraph?.spearman?.lag || 0}</div>
+                    </div>
+                </div>
+
+                <div className="mt-6 p-4 border-2 border-dashed border-zinc-200 rounded bg-white text-center">
+                    <p className="text-xs text-zinc-400 font-mono italic">
+                        [ SYSTEM ANALYSIS ]<br />
+                        DETECTING LEAD-LAG RELATIONSHIPS BETWEEN VOLUME AND PRICE MANIFOLD.
+                    </p>
                 </div>
             </div>
           )}
@@ -969,17 +1151,18 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                   </div>
               ))}
           </div>
-          <form className="ai-chat-form" onSubmit={onChatSubmit}>
+          <form className="ai-chat-form mt-auto bg-[#101014] border-t border-zinc-800" onSubmit={onChatSubmit}>
               <input 
                   type="text" 
                   value={chatInput} 
                   onChange={e => setChatInput(e.target.value)} 
-                  placeholder="ENTER KERNEL COMMAND OR INQUIRY..."
+                  placeholder="ASK SMK KERNEL... (e.g. 'explain λ1' or 'show bias')"
                   className="ai-chat-input"
+                  style={{ background: 'transparent' }}
                   disabled={isAiLoading}
               />
               <button type="submit" className="ai-chat-btn" disabled={isAiLoading || !chatInput.trim()}>
-                  {isAiLoading ? '...' : <Check className="w-3 h-3" />}
+                  {isAiLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <MessageSquare className="w-3 h-3" />}
               </button>
           </form>
       </div>
