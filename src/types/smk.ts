@@ -150,19 +150,5 @@ export interface SMKResult {
     lot_size: number;
     risk_pips: number;
   };
-  order_flow?: {
-    delta: number;
-    is_absorption: boolean;
-    burst_density: number;
-    pulse: boolean;
-    status: string;
-  };
-  reversal_prob?: number;
-  session_pnl?: {
-    realized: number;
-    unrealized: number;
-    total: number;
-    active: boolean;
-  };
   sensors?: Array<{ id: string; name: string; score: number; active: boolean }>;
 }

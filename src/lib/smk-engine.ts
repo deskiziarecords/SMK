@@ -83,10 +83,6 @@ export class SMKEngine {
 
   constructor() {}
 
-  public get bars(): OHLCV[] {
-    return this.rawBars;
-  }
-
   public loadBars(bars: OHLCV[]) {
     this.rawBars = bars;
     this.cursor = 0;

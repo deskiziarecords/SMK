@@ -60,13 +60,6 @@ def _load_aegis():
         return None
 
 
-    def _load_broker():
-    try:
-        from broker_executor import get_executor
-        return get_executor
-    except ImportError:
-        return None
-
 # ── CLM TOKENIZER (inline — no sentence_transformers needed) ─────────────────
 
 class _CLMTokenizer:
@@ -156,17 +149,10 @@ class AegisBridge:
         self.capital        = capital
         self.enabled        = enabled
         self._tokenizer     = _CLMTokenizer()
-        self.initial_capital = capital
 
         # ── Backend Position State ─────────────────────────────────────────
         self.active_trade: Optional[Dict[str, Any]] = None
         self.session_pnl: float = 0.0
-        self.profit_target_enabled = False
-        self.profit_target_pct = 0.02
-
-        # ── Broker Executor ───────────────────────────────────────────────
-        self.get_executor = _load_broker()
-        self._broker = self.get_executor() if self.get_executor else None
 
         # ── StopLossManager ───────────────────────────────────────────────
         SLM, SeqSLM = _load_stop_loss()
@@ -215,44 +201,45 @@ class AegisBridge:
         if self._slm_available:
             self._slm.engine.update_capital(new_capital)
 
-    async def evaluate_async(
+    def evaluate(
         self,
         smk:       dict,
         bars:      List[dict],
         override_direction: Optional[int] = None,
     ) -> dict:
         """
-        Evaluate SMK result asynchronously.
+        Evaluate one SMK bar result through the full execution chain.
         """
         if not self.enabled:
             return _null_exe("BRIDGE_DISABLED")
 
+        # ── Inputs (Define early for monitoring) ──────────────────────────
         bar_curr  = smk.get("bar", {})
         entry     = float(bar_curr.get("close", 0.0))
         if entry <= 0:
             return _null_exe("NO_PRICE")
 
-        # Global Profit Target check
-        if self.profit_target_enabled:
+        # ── Global Profit Target check ────────────────────────────────────
+        if getattr(self, 'profit_target_enabled', False):
             floating_pnl = 0
             if self.active_trade:
                 t = self.active_trade
                 floating_pnl = (entry - t["entry"]) * t["direction"] * t["lot_size"] * 10000
             
             total_gain = self.session_pnl + floating_pnl
-            if total_gain >= (self.initial_capital * self.profit_target_pct):
+            if total_gain >= (getattr(self, 'initial_capital', self.capital) * getattr(self, 'profit_target_pct', 0.02)):
                 if self.active_trade:
                     self.session_pnl += floating_pnl
                     self.active_trade = None
-                    if self._broker: await self._broker.cancel_all()
                 return _null_exe("PROFIT_TARGET_REACHED")
 
-        # Position Monitoring
+        # ── Position Monitoring (Backend Logic Respects SL/TP) ─────────────
         if self.active_trade:
             t = self.active_trade
             p_high = float(bar_curr.get("high", entry))
             p_low  = float(bar_curr.get("low", entry))
             
+            # Check SL/TP hit
             hit_sl = False; hit_tp = False
             if t["direction"] == 1: # Long
                 if p_low <= t["stop_loss_price"]: hit_sl = True
@@ -263,20 +250,23 @@ class AegisBridge:
             
             if hit_sl or hit_tp:
                 reason = "CLOSED_SL_HIT" if hit_sl else "CLOSED_TP_HIT"
+                # rough pnl calculation in pips
                 pnl = (entry - t["entry"]) * t["direction"] * t["lot_size"] * 10000
                 self.session_pnl += pnl
                 self.active_trade = None
                 return _null_exe(reason)
 
+        # Only evaluate on PROCEED decisions
         veto = smk.get("veto", {})
         if veto.get("decision") != "Proceed":
             return _null_exe(f"VETO:{veto.get('decision','UNKNOWN')}")
 
         direction = override_direction or _CLMTokenizer.direction_from_smk(smk)
 
-        # Position Flipping
+        # ── Position Flipping ─────────────────────────────────────────────
         if self.active_trade and direction != 0 and direction != self.active_trade["direction"]:
             t = self.active_trade
+            # Close existing trade
             pnl = (entry - t["entry"]) * t["direction"] * t["lot_size"] * 10000
             self.session_pnl += pnl
             self.active_trade = None
@@ -285,6 +275,7 @@ class AegisBridge:
         if direction == 0:
             return _null_exe("NO_DIRECTIONAL_BIAS")
             
+        # If we already have a trade in the same direction, don't reopen
         if self.active_trade and self.active_trade["direction"] == direction:
              t = self.active_trade
              return {
@@ -301,13 +292,24 @@ class AegisBridge:
         confidence= float(smk.get("fusion", {}).get("confidence", 0.5))
         amd_state = smk.get("amd", {}).get("state", "Accumulation")
 
+        # ── CLM sequence ──────────────────────────────────────────────────
         sequence  = self._tokenizer.sequence(bars, n=8)
-        
+        dominant  = max(sequence, key=lambda c: {"W":5,"w":5,"B":4,"I":4,"X":3,"U":2,"D":2}.get(c,1)) \
+                    if sequence else "X"
+
+        # ── StopLossManager ───────────────────────────────────────────────
         exe = _null_exe("SLM_UNAVAILABLE")
+
         if self._slm_available:
             try:
-                atr_val = self._slm.engine.atr.value
-                profile = self._slm.calculate_from_sequence(sequence, entry, direction, atr_val, confidence)
+                atr_val = self._slm.engine.atr.value  # may be None during warmup
+                profile = self._slm.calculate_from_sequence(
+                    sequence    = sequence,
+                    entry_price = entry,
+                    direction   = direction,
+                    atr_override= atr_val,
+                    confidence  = confidence,
+                )
                 exe = {
                     "action":           "ARMED" if profile.is_valid else "HALT",
                     "reason":           profile.status,
@@ -327,40 +329,82 @@ class AegisBridge:
                     "is_armed":         bool(profile.is_valid),
                 }
             except Exception as e:
+                log.warning("StopLossManager error: %s", e)
                 exe = _null_exe(f"SLM_ERROR:{e}")
 
-        # AegisExtensions
+        # ── AegisExtensions (async wrapper — run synchronously via asyncio) ─
         if self._aegis_available and exe.get("is_armed"):
             try:
+                import asyncio
+
                 bar_payload = {
-                    "close": entry,
-                    "high": float(bar_curr.get("high", entry)),
-                    "low": float(bar_curr.get("low", entry)),
-                    "volume": float(bar_curr.get("volume", 100)),
-                    "sigma": {"Accumulation":0,"Manipulation":1,"Distribution":2,"Retracement":3}.get(amd_state, 0),
-                    "phi": confidence,
+                    "close":    entry,
+                    "high":     float(bar.get("high", entry)),
+                    "low":      float(bar.get("low", entry)),
+                    "volume":   float(bar.get("volume", 100)),
+                    "sigma":    {"Accumulation":0,"Manipulation":1,
+                                 "Distribution":2,"Retracement":3}.get(amd_state, 0),
+                    "phi":      confidence,
                     "killzone": bool(smk.get("session", {}).get("killzone", False)),
                 }
-                long_p = float(max(0.0, p_fused))
+
+                # infer signal_probs from p_fused
+                long_p  = float(max(0.0, p_fused))
                 short_p = float(max(0.0, -p_fused))
-                flat_p = float(max(0.0, 1.0 - long_p - short_p))
-                probs = np.array([long_p, flat_p, short_p], dtype=np.float32)
+                flat_p  = float(max(0.0, 1.0 - long_p - short_p))
+                probs   = np.array([long_p, flat_p, short_p], dtype=np.float32)
 
-                aegis_result = await self._aegis.on_signal(bar_payload, float(p_fused), confidence, probs)
+                # Run async on_signal in a new event loop if needed
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # We're inside an async context — schedule and get result
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                            future = pool.submit(
+                                asyncio.run,
+                                self._aegis.on_signal(
+                                    bar          = bar_payload,
+                                    signal       = float(p_fused),
+                                    confidence   = confidence,
+                                    signal_probs = probs,
+                                )
+                            )
+                            aegis_result = future.result(timeout=2.0)
+                    else:
+                        aegis_result = loop.run_until_complete(
+                            self._aegis.on_signal(
+                                bar          = bar_payload,
+                                signal       = float(p_fused),
+                                confidence   = confidence,
+                                signal_probs = probs,
+                            )
+                        )
+                except RuntimeError:
+                    aegis_result = asyncio.run(
+                        self._aegis.on_signal(
+                            bar          = bar_payload,
+                            signal       = float(p_fused),
+                            confidence   = confidence,
+                            signal_probs = probs,
+                        )
+                    )
 
-                exe["action"] = str(aegis_result.action)
-                exe["kelly_size"] = float(aegis_result.kelly_size)
+                # Merge AEGIS result into exe
+                exe["action"]           = str(aegis_result.action)
+                exe["kelly_size"]       = float(aegis_result.kelly_size)
                 exe["venue_allocation"] = [float(x) for x in (aegis_result.venue_allocation or [])]
-                exe["delta_e"] = float(aegis_result.delta_e)
-                exe["rev_score"] = float(aegis_result.rev_score)
+                exe["delta_e"]          = float(aegis_result.delta_e)
+                exe["rev_score"]        = float(aegis_result.rev_score)
 
                 if aegis_result.action == "HALT":
-                    exe["reason"] = str(aegis_result.halt_reason)
-                    exe["is_armed"] = False
-                    exe["lot_size"] = 0.0
+                    exe["reason"]    = str(aegis_result.halt_reason)
+                    exe["is_armed"]  = False
+                    exe["lot_size"]  = 0.0
                 elif aegis_result.action == "REDUCE":
-                    exe["lot_size"] = round(exe["lot_size"] * 0.5, 2)
+                    exe["lot_size"]  = round(exe["lot_size"] * 0.5, 2)
 
+                # ── Record Trade in Backend state ─────────────────────────
                 if exe.get("is_armed") and exe.get("action") in ("TRADE", "ARMED"):
                     self.active_trade = {
                         "entry": entry,
@@ -370,45 +414,10 @@ class AegisBridge:
                         "lot_size": exe["lot_size"],
                         "ts": time.time()
                     }
-                    # Execute via broker
-                    if self._broker:
-                        await self._broker.execute_trade(exe)
 
             except Exception as e:
-                log.warning("AEGIS ASYNC ERROR: %s", e)
-
-        if not exe.get("is_armed") and exe.get("action") not in ("HALT", "REDUCE", "WARMUP"):
-            exe["action"] = "HALT"
-        elif exe.get("is_armed") and exe.get("action") == "ARMED":
-            exe["action"] = "TRADE"
-
-        return exe
-
-    def evaluate(
-        self,
-        smk:       dict,
-        bars:      List[dict],
-        override_direction: Optional[int] = None,
-    ) -> dict:
-        """
-        Legacy synchronous wrapper for evaluate.
-        """
-        import asyncio
-        import time
-        try:
-             loop = asyncio.get_event_loop()
-             if loop.is_running():
-                 # This is tricky if already in loop. For now, we'll try to use a dummy response or similar.
-                 # But usually the caller of evaluate (SMKPipeline) is sync in this project.
-                 # Let's use a small helper to run it.
-                 from concurrent.futures import ThreadPoolExecutor
-                 with ThreadPoolExecutor(max_workers=1) as executor:
-                     return executor.submit(asyncio.run, self.evaluate_async(smk, bars, override_direction)).result(timeout=5)
-             else:
-                 return asyncio.run(self.evaluate_async(smk, bars, override_direction))
-        except Exception as e:
-            print(f"[AEGIS] evaluate fallback error: {e}")
-            return _null_exe("ASYNC_EVAL_ERROR")
+                log.warning("AegisExtensions error: %s", e)
+                # Keep SLM result, just no AEGIS sizing
 
         # Final action normalisation
         if not exe.get("is_armed") and exe.get("action") not in ("HALT", "REDUCE", "WARMUP"):

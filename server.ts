@@ -139,21 +139,6 @@ async function startServer() {
     }
   });
 
-  // --- MODEL MANAGEMENT ---
-  app.post('/api/model/select', (req, res) => {
-    const { name } = req.body;
-    // For the TS engine, we can simulate switching
-    console.log(`[MODEL] Selecting ${name}`);
-    res.json({ status: 'ok', active: name });
-  });
-
-  app.post('/api/model/train', (req, res) => {
-    const { name, data } = req.body;
-    console.log(`[MODEL] Retraining ${name} with ${data?.length || 0} points`);
-    // In a real system, this would trigger the Python trainer
-    res.json({ status: 'training_started', model: name });
-  });
-
   // MCP ENDPOINTS for Model Monitoring
   app.get('/api/mcp/state', (req, res) => {
     const lastResult = engine.getLastResult();
@@ -174,62 +159,7 @@ async function startServer() {
   });
 
   // --- WEBSOCKET HANDLING ---
-  const clients = new Set<WebSocket>();
-  
-  // LIVE FEED POLLER (Bitget every 5 seconds)
-  let livePoller: NodeJS.Timeout | null = null;
-  let lastLiveTs = 0;
-
-  function stopLiveFeed() {
-    if (livePoller) {
-      clearInterval(livePoller);
-      livePoller = null;
-    }
-  }
-
-  function startLiveFeed(symbol: string, granularity: string) {
-    stopLiveFeed();
-    console.log(`[LIVE] Starting Bitget poller: ${symbol} ${granularity}`);
-    
-    livePoller = setInterval(async () => {
-      try {
-        const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=5`;
-        const r = await fetch(url);
-        const data: any = await r.json();
-        if (data.code === '00000' && data.data) {
-          const bars: OHLCV[] = data.data.map((c: any) => ({
-            time: Math.floor(parseInt(c[0]) / 1000),
-            open: parseFloat(c[1]),
-            high: parseFloat(c[2]),
-            low: parseFloat(c[3]),
-            close: parseFloat(c[4]),
-            volume: parseFloat(c[5])
-          })).sort((a: any, b: any) => a.time - b.time);
-
-          const newBars = bars.filter(b => b.time > lastLiveTs);
-          for (const bar of newBars) {
-            // Check if bar is closed (roughly)
-            // Bitget granularity is in minutes or hours.
-            // For now, we'll just feed any new bar to the engine and broadcast.
-            engine.loadBars([...engine.bars, bar]); 
-            const result = engine.step(); // This logic might need refinement for "latest" bar
-            if (result) {
-              const payload = JSON.stringify({ type: 'bar', data: { ...result, live: true } });
-              clients.forEach(c => {
-                if (c.readyState === WebSocket.OPEN) c.send(payload);
-              });
-            }
-            lastLiveTs = bar.time;
-          }
-        }
-      } catch (err) {
-        console.error("[LIVE ERROR]", err);
-      }
-    }, 5000);
-  }
-
   wss.on('connection', (ws) => {
-    clients.add(ws);
     let running = false;
     let interval: NodeJS.Timeout | null = null;
 
@@ -250,10 +180,6 @@ async function startServer() {
             if (interval) clearInterval(interval);
           }
         }, speed);
-      } else if (msg.action === 'start_live') {
-        startLiveFeed(msg.symbol || 'BTCUSDT', msg.granularity || '1min');
-      } else if (msg.action === 'stop_live') {
-        stopLiveFeed();
       } else if (msg.action === 'stop') {
         running = false;
         if (interval) clearInterval(interval);
@@ -268,7 +194,6 @@ async function startServer() {
     });
 
     ws.on('close', () => {
-      clients.delete(ws);
       if (interval) clearInterval(interval);
     });
   });
