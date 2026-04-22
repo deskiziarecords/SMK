@@ -9,8 +9,8 @@ from typing import Optional
 from pydantic import BaseModel
 
 # IMPORTANT: Import logger functions at the top
-from .logger import log_bar, log_session, log_data_load, log_trade, get_log_files, get_log_dir, LOG_DIR
-from .realtime import live_feed
+from logger import log_bar, log_session, log_data_load, log_trade, get_log_files, get_log_dir, LOG_DIR
+from realtime import live_feed
 
 app = FastAPI(title="QUIMERIA SMK API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
