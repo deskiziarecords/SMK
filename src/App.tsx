@@ -210,7 +210,6 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
   useEffect(() => {
     let reconnectTimeout: NodeJS.Timeout;
     const connect = () => {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `ws://localhost:8000`;
         const ws = new WebSocket(wsUrl);
 
