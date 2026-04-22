@@ -42,28 +42,32 @@ from typing import List, Dict, Optional
 
 # Plugin system — lazy load to avoid circular imports
 _plugin_mgr = None
+_plugin_mgr_attempted = False
 def _get_plugins():
-    global _plugin_mgr
-    if _plugin_mgr is None:
+    global _plugin_mgr, _plugin_mgr_attempted
+    if not _plugin_mgr_attempted:
         try:
             from plugin_manager import get_plugin_manager
             _plugin_mgr = get_plugin_manager()
         except Exception as e:
             print(f"[SMK] Plugin manager not available: {e}")
             _plugin_mgr = None
+        _plugin_mgr_attempted = True
     return _plugin_mgr
 
 # AEGIS bridge — lazy load
 _aegis_bridge = None
+_aegis_bridge_attempted = False
 def _get_bridge():
-    global _aegis_bridge
-    if _aegis_bridge is None:
+    global _aegis_bridge, _aegis_bridge_attempted
+    if not _aegis_bridge_attempted:
         try:
             from aegis_bridge import get_bridge
             _aegis_bridge = get_bridge()
         except Exception as e:
             print(f"[SMK] AEGIS bridge not available: {e}")
             _aegis_bridge = None
+        _aegis_bridge_attempted = True
     return _aegis_bridge
 
 
