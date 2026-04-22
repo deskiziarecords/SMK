@@ -31,7 +31,8 @@ async function startServer() {
   app.post('/api/load/sample', (req, res) => {
     const bars = generateSyntheticData(400);
     engine.loadBars(bars);
-    res.json({ status: 'ok', count: bars.length, source: 'synthetic' });
+    const snapshot = engine.getSnapshot(100);
+    res.json({ status: 'ok', count: bars.length, source: 'synthetic', snapshot });
   });
 
   app.post('/api/load/bitget', async (req, res) => {
@@ -52,7 +53,8 @@ async function startServer() {
       })).sort((a: any, b: any) => a.time - b.time);
 
       engine.loadBars(bars);
-      res.json({ status: 'ok', count: bars.length, source: `bitget:${symbol}` });
+      const snapshot = engine.getSnapshot(100);
+      res.json({ status: 'ok', count: bars.length, source: `bitget:${symbol}`, snapshot });
     } catch (err: any) {
       res.status(500).json({ status: 'error', message: err.message });
     }
@@ -102,7 +104,8 @@ async function startServer() {
 
       const sortedBars = bars.sort((a, b) => a.time - b.time);
       engine.loadBars(sortedBars);
-      res.json({ status: 'ok', count: sortedBars.length });
+      const snapshot = engine.getSnapshot(100);
+      res.json({ status: 'ok', count: sortedBars.length, snapshot });
     } catch (err: any) {
       res.status(500).json({ status: 'error', message: err.message });
     }

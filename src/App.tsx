@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, ChangeEvent } from 'react';
+import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
+import { GoogleGenAI } from "@google/genai";
 import { SMKResult } from './types/smk';
-import { RefreshCw, Play, Square, FastForward, Settings, X, Check } from 'lucide-react';
+import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown } from 'lucide-react';
 
 const MODULE_DEFS = [
   {id:'bias',        name:'Bias Detector',       layer:'L1'},
@@ -50,18 +51,73 @@ export default function App() {
   const [takeProfit, setTakeProfit] = useState(30.0);
   const [speed, setSpeed] = useState(300);
   const [summary, setSummary] = useState({ wins: 0, losses: 0 });
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'model', text: string }[]>([]);
+  const [chatInput, setChatInput] = useState('');
+  const [isAiLoading, setIsAiLoading] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const [hoverData, setHoverData] = useState<SMKResult | null>(null);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
+  const [viewMode, setViewMode] = useState<'chart' | 'matrix'>('chart');
+  const [aiOpen, setAiOpen] = useState(false);
 
   const [moduleStates, setModuleStates] = useState<Record<string, boolean>>(
     Object.fromEntries(MODULE_DEFS.map(m => [m.id, true]))
   );
 
-  // Initialize Chart
+  useEffect(() => {
+    chatScrollRef.current?.scrollTo({ top: chatScrollRef.current.scrollHeight, behavior: 'smooth' });
+  }, [chatMessages]);
+
+  const onChatSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || isAiLoading) return;
+
+    const userMsg = chatInput.trim();
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', text: userMsg }]);
+    setIsAiLoading(true);
+
+    try {
+      const ai = new GoogleGenAI({ apiKey: (process.env as any).GEMINI_API_KEY });
+      // Contextualize with current kernel state
+      const context = result ? `
+Current Market Context:
+Symbol: BTCUSDT
+Price: ${result.bar.close}
+Bias: ${result.bias?.bias}
+Phase: ${result.ipda_phase?.phase}
+Session: ${result.session?.name}
+Sequence: ${result.smart?.sequence}
+Veto: ${result.veto?.decision}
+Reasons: ${result.veto?.reasons?.join(', ')}
+Execution: ${result.execution?.action} (${result.execution?.reason})
+` : "Waiting for kernel synchronization...";
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [
+            { role: 'user', parts: [{ text: `You are the Sovereign Kernel AI Core. Assist the operator. Current context: ${context}\n\nOperator: ${userMsg}` }] }
+        ],
+        config: {
+            systemInstruction: "You are the Sovereign Kernel AI Core, a hyper-advanced trading intelligence system. Your tone is technical, concise, and professional. Use trading terminology like Liquidity, Fair Value Gap, Order Block, and Mitigation when appropriate. Stay in character as a core kernel system."
+        }
+      });
+
+      const aiText = response.text || "NO_RESPONSE_RECEIVED";
+      setChatMessages(prev => [...prev, { role: 'model', text: aiText }]);
+    } catch (err) {
+      console.error("AI ERROR:", err);
+      setChatMessages(prev => [...prev, { role: 'model', text: "CORE SIGNAL INTERRUPTED: UNABLE TO REACH GEMINI CLOUD PORTAL." }]);
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  // Initial Chart
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
@@ -82,6 +138,8 @@ export default function App() {
         borderColor: '#e8e8e8',
         timeVisible: true,
         secondsVisible: false,
+        shiftVisibleRangeOnNewBar: true,
+        rightOffset: 12,
       },
       rightPriceScale: { 
         borderColor: '#e8e8e8',
@@ -181,6 +239,7 @@ export default function App() {
     };
 
     connect();
+    addLog('ev', 'SOVEREIGN KERNEL BOOT SEQUENCE INITIATED', 'ok');
 
     return () => {
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
@@ -230,11 +289,17 @@ export default function App() {
         }
     }
     if (data.manipulation?.active) {
-        addLog('ev', `JUDAS SWING DETECTED @ ${bar.close.toFixed(5)}`, 'alert');
+        const wasActive = result?.manipulation?.active;
+        if (!wasActive) {
+            addLog('ev', `JUDAS SWING DETECTED @ ${bar.close.toFixed(5)}`, 'alert');
+        }
         markers.push({ time: bar.time as any, position: 'aboveBar', color: '#c05000', shape: 'circle', text: 'JUDAS' });
     }
     if (data.veto?.decision === 'Halt') {
-        data.veto.reasons.forEach(r => addLog('vt', `HALT: ${r}`, 'alert'));
+        const lastDecision = result?.veto?.decision;
+        if (lastDecision !== 'Halt') {
+            data.veto.reasons.forEach(r => addLog('vt', `HALT: ${r}`, 'alert'));
+        }
     }
 
     // SL/TP Monitor
@@ -255,24 +320,28 @@ export default function App() {
     }
 
     // Auto Mode execution
-    if (autoMode) {
+    if (autoMode && data.execution?.action === 'PROCEED') {
         const hasLong = trades.some(t => t.side === 'buy');
         const hasShort = trades.some(t => t.side === 'sell');
 
-        if (data.veto?.decision === 'Halt' && trades.length > 0) {
-            setTrades([]);
-            addLog('tr', 'AUTO-SYSTEM: HALT SIGNAL -> CLOSED ALL', 'alert');
-        } else if (data.fusion?.p_fused && data.fusion.p_fused > 0.58 && !hasLong) {
+        if (data.execution.direction === 1 && !hasLong) {
             openTrade('buy');
-            addLog('tr', 'MCP AGENT: STRONG BULLISH FUSION -> AUTO-BUY', 'ok');
-        } else if (data.fusion?.p_fused && data.fusion.p_fused < -0.58 && !hasShort) {
+            addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> BUY`, 'ok');
+        } else if (data.execution.direction === -1 && !hasShort) {
             openTrade('sell');
-            addLog('tr', 'MCP AGENT: STRONG BEARISH FUSION -> AUTO-SELL', 'alert');
+            addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> SELL`, 'alert');
         }
     }
 
+    if (autoMode && data.execution?.action === 'HALT' && trades.length > 0) {
+        setTrades([]);
+        addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> EMERGENCY LIQUIDATION`, 'alert');
+    }
+
     // Ensure chart advances
-    chartRef.current?.timeScale().scrollToRealTime();
+    if (chartRef.current && isRunning) {
+        chartRef.current.timeScale().scrollToRealTime();
+    }
   };
 
   processBarRef.current = processBar;
@@ -284,6 +353,14 @@ export default function App() {
 
   const loadData = async (type: string) => {
     try {
+        // Clear old sessions
+        candleSeriesRef.current?.setData([]);
+        volumeSeriesRef.current?.setData([]);
+        markersRef.current = [];
+        candleSeriesRef.current?.setMarkers([]);
+        historicalResultsRef.current.clear();
+        setResult(null);
+
         const resp = await fetch(`/api/load/${type}`, { 
             method: 'POST', 
             headers: { 'Content-Type': 'application/json' },
@@ -294,6 +371,25 @@ export default function App() {
             setDataLoaded(true);
             setSource(type.toUpperCase());
             addLog('ev', `LOADED ${data.count} BARS FROM ${data.source}`, 'ok');
+            
+            if (data.snapshot && Array.isArray(data.snapshot)) {
+                const results = data.snapshot;
+                const candleData = results.map((r: any) => r.bar);
+                const volumeData = results.map((r: any) => ({
+                    time: r.bar.time,
+                    value: r.bar.volume,
+                    color: r.bar.close >= r.bar.open ? '#237a4522' : '#aa282822'
+                }));
+                candleSeriesRef.current?.setData(candleData);
+                volumeSeriesRef.current?.setData(volumeData);
+                setResult(results[results.length - 1]);
+                results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
+            }
+
+            // Initial view sync
+            setTimeout(() => {
+              chartRef.current?.timeScale().fitContent();
+            }, 50);
         }
     } catch (err) {
         addLog('ev', 'LOAD FAILED', 'alert');
@@ -315,6 +411,23 @@ export default function App() {
         setDataLoaded(true);
         setSource('CSV:' + file.name.toUpperCase());
         addLog('ev', `LOADED ${data.count} BARS FROM ${file.name}`, 'ok');
+
+        if (data.snapshot && Array.isArray(data.snapshot)) {
+            const results = data.snapshot;
+            const candleData = results.map((r: any) => r.bar);
+            const volumeData = results.map((r: any) => ({
+                time: r.bar.time,
+                value: r.bar.volume,
+                color: r.bar.close >= r.bar.open ? '#237a4522' : '#aa282822'
+            }));
+            candleSeriesRef.current?.setData(candleData);
+            volumeSeriesRef.current?.setData(volumeData);
+            setResult(results[results.length - 1]);
+            results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
+            setTimeout(() => {
+              chartRef.current?.timeScale().fitContent();
+            }, 50);
+        }
       }
     } catch (err) {
       addLog('ev', 'CSV LOAD FAILED', 'alert');
@@ -507,6 +620,30 @@ export default function App() {
         </span>
         <span className="pill p-off">SRC:{source}</span>
         {isRunning && <div className="dot"></div>}
+
+        <div className="flex gap-1 ml-2">
+            <button 
+                className={`btn ${viewMode === 'chart' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                onClick={() => setViewMode('chart')}
+                title="Chart View"
+            >
+                <BarChart2 size={12} />
+            </button>
+            <button 
+                className={`btn ${viewMode === 'matrix' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                onClick={() => setViewMode('matrix')}
+                title="Matrix View"
+            >
+                <LayoutGrid size={12} />
+            </button>
+            <button 
+                className={`btn ${aiOpen ? 'bg-blue-100 border-blue-400' : ''}`}
+                onClick={() => setAiOpen(!aiOpen)}
+                title="AI Core"
+            >
+                <MessageSquare size={12} className={aiOpen ? 'text-blue-600' : ''} />
+            </button>
+        </div>
         
         <div className="tb-r">
           <span className={`pill ${wsStatus === 'LIVE' ? 'p-ok' : wsStatus === 'PAUSED' ? 'p-warn' : 'p-alert'} flex items-center gap-1.5`}>
@@ -553,6 +690,7 @@ export default function App() {
             <span className="cb">SES:{result?.session?.name.split('_')[0] || '--'}</span>
             <span className="cb">BIAS:{result?.bias?.bias.slice(0,4) || '--'}</span>
             <span className="cb">PHASE:{result?.ipda_phase?.phase.slice(0,4) || '--'}</span>
+            <span className="cb font-mono tracking-[0.2em] text-[7px] bg-white text-zinc-800 border border-zinc-200 px-1 rounded">SEQ:{result?.smart?.sequence.slice(-10) || '----------'}</span>
             {result?.fvg?.active && <span className="cb cb-alert">FVG</span>}
             {result?.ob?.active && <span className="cb">OB</span>}
             {result?.manipulation?.active && <span className="cb cb-alert">JUDAS</span>}
@@ -579,7 +717,7 @@ export default function App() {
             )}
           </div>
 
-          <div className="chart-wrap">
+          <div className="chart-wrap" style={{ visibility: viewMode === 'chart' ? 'visible' : 'hidden', position: viewMode === 'chart' ? 'relative' : 'absolute', zIndex: viewMode === 'chart' ? 1 : -1, width: '100%', height: viewMode === 'chart' ? '100%' : '0' }}>
             <div ref={chartContainerRef} className="absolute inset-0" />
             <div className="hud">
               <div className="hud-r">
@@ -593,6 +731,22 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {viewMode === 'matrix' && (
+            <div className="matrix-view">
+                <div className="matrix-grid">
+                    {Array.from(historicalResultsRef.current.values()).sort((a: any, b: any) => a.bar.time - b.bar.time).map((res: any, i) => (
+                        <div key={res.bar.time} className="matrix-cell" style={{ 
+                            color: res.bar.close >= res.bar.open ? 'var(--up)' : 'var(--down)',
+                            background: res.smart?.symbol === 'B' ? '#e6f4ea' : res.smart?.symbol === 'I' ? '#fce8e6' : 'transparent'
+                        }}>
+                            {res.smart?.symbol || 'X'}
+                        </div>
+                    ))}
+                    {isRunning && <div className="matrix-cell animate-pulse border-l-2 border-zinc-400 font-bold">_</div>}
+                </div>
+            </div>
+          )}
 
           <div className="logs">
             <div className="lbox">
@@ -618,8 +772,15 @@ export default function App() {
 
         {/* RIGHT PANEL */}
         <div className="rp">
-          <div className={`veto-banner ${result?.veto?.decision === 'Halt' ? 'vb-halt' : ''}`}>
-            {result?.veto?.decision.toUpperCase() || 'PROCEED'}
+          <div className="rb">
+            <div className="rl">EXECUTION ENGINE</div>
+            <div className={`veto-banner mb-2 ${result?.execution?.action === 'HALT' ? 'vb-halt' : result?.execution?.action === 'PROCEED' ? 'vb-proceed' : ''}`}>
+              {result?.execution?.action === 'PROCEED' ? 'EXECUTION ARMED' : result?.execution?.action || 'IDLE'}
+            </div>
+            <div className="caur"><span className="cl">SIGNAL</span><span className={result?.execution?.direction === 1 ? 'text-green-600 font-bold' : result?.execution?.direction === -1 ? 'text-red-600 font-bold' : 'text-zinc-400'}>{result?.execution?.direction === 1 ? 'BUY' : result?.execution?.direction === -1 ? 'SELL' : 'NONE'}</span></div>
+            <div className="caur"><span className="cl">REASON</span><span className="text-[7px] truncate max-w-[100px] text-zinc-500 uppercase">{result?.execution?.reason || '--'}</span></div>
+            <div className="caur"><span className="cl">PATTERN</span><span className="font-mono text-zinc-600 tracking-widest">{result?.execution?.pattern || '--'}</span></div>
+            <div className="caur" style={{ borderBottom: 'none' }}><span className="cl">RISK PIPS</span><span className="text-zinc-600">{result?.execution?.risk_pips?.toFixed(1) || '0.0'}p</span></div>
           </div>
 
           <div className="trade-panel">
@@ -657,7 +818,12 @@ export default function App() {
               </div>
             </div>
             <div className="t-lbl">ENTRY PRICE</div>
-            <input type="number" className="t-input" value={result?.bar.close.toFixed(5) || 0} readOnly />
+            <input 
+              type="text" 
+              className="t-input" 
+              value={result?.bar.close ? result.bar.close.toFixed(5) : '--'} 
+              readOnly 
+            />
             <div className="trade-row">
               <button className={`btn-buy ${buySignal ? 'signal-active' : ''}`} onClick={() => openTrade('buy')}>▲ BUY</button>
               <button className={`btn-sell ${sellSignal ? 'signal-active' : ''}`} onClick={() => openTrade('sell')}>▼ SELL</button>
@@ -775,6 +941,47 @@ export default function App() {
         <div className="pbar">
            <div className="pbf" style={{ width: `${((result?.bar_index || 0) / (result?.total_bars || 1) * 100).toFixed(0)}%` }}></div>
         </div>
+      </div>
+
+      <div className={`ai-drawer ${aiOpen ? 'ai-drawer-open' : ''}`}>
+          <div className="ai-chat-header">
+              <span className="font-bold text-[10px] flex items-center gap-1">
+                  <RefreshCw className={`w-3 h-3 ${isAiLoading ? 'animate-spin text-orange-500' : 'text-blue-500'}`} />
+                  GEMINI AI CORE (OFF-CANVAS)
+              </span>
+              <div className="flex items-center gap-2">
+                  <span className="text-[8px] opacity-50 uppercase tracking-widest">L4 INTELLIGENCE LAYER</span>
+                  <button onClick={() => setAiOpen(false)} className="p-1 hover:bg-zinc-200 rounded">
+                      <ChevronDown size={14} />
+                  </button>
+              </div>
+          </div>
+          <div className="ai-chat-messages" ref={chatScrollRef}>
+              {chatMessages.length === 0 && (
+                  <div className="text-[9px] text-zinc-500 italic p-4 text-center">
+                      ESTABLISHING LINK... WAITING FOR INSTRUCTION.
+                  </div>
+              )}
+              {chatMessages.map((m, i) => (
+                  <div key={i} className={`ai-msg ${m.role}`}>
+                      <span className="role-lbl">{m.role === 'user' ? 'OPERATOR' : 'KERNEL'}:</span>
+                      <p className="msg-txt">{m.text}</p>
+                  </div>
+              ))}
+          </div>
+          <form className="ai-chat-form" onSubmit={onChatSubmit}>
+              <input 
+                  type="text" 
+                  value={chatInput} 
+                  onChange={e => setChatInput(e.target.value)} 
+                  placeholder="ENTER KERNEL COMMAND OR INQUIRY..."
+                  className="ai-chat-input"
+                  disabled={isAiLoading}
+              />
+              <button type="submit" className="ai-chat-btn" disabled={isAiLoading || !chatInput.trim()}>
+                  {isAiLoading ? '...' : <Check className="w-3 h-3" />}
+              </button>
+          </form>
       </div>
     </div>
   );

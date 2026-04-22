@@ -2,12 +2,70 @@ import { OHLCV, SMKResult } from '../types/smk';
 import * as ss from 'simple-statistics';
 import FFT from 'fft.js';
 
+enum SymbolType {
+  SYM_B = 0,
+  SYM_I = 1,
+  SYM_W = 2,
+  SYM_w = 3,
+  SYM_U = 4,
+  SYM_D = 5,
+  SYM_X = 6
+}
+
+const SYM_CHAR = ['B', 'I', 'W', 'w', 'U', 'D', 'X'];
+const SYM_VALUE = [900, -900, 500, -500, 330, -320, 100];
+const SYM_SL_PCT = [0.008, 0.008, 0.006, 0.006, 0.010, 0.010, 0.005];
+
+const POSITION_TABLES = [
+  // B
+  [-20,-15,-10,-5,-5,-10,-15,-20,-10,0,0,5,5,0,0,-10,
+   -10,5,10,15,15,10,5,-10,-5,0,15,20,20,15,0,-5,
+   -5,5,15,25,25,15,5,-5,-10,0,10,20,20,10,0,-10,
+   10,20,30,40,40,30,20,10,50,50,55,60,60,55,50,50],
+  // I
+  [-5,-5,-5,-6,-6,-5,-5,-5,-1,-2,-3,-4,-4,-3,-2,-1,
+   1,0,-1,-1,-1,-1,0,1,0,0,-1,-2,-2,-1,0,0,
+   0,0,-1,-2,-2,-1,0,0,1,0,-1,-1,-1,-1,0,1,
+   2,1,1,0,0,1,1,2,2,1,1,0,0,1,1,2],
+  // W
+  [0,0,0,0,0,0,0,0,-1,0,0,1,1,0,0,-1,-1,0,1,2,2,1,0,-1,
+   0,0,1,2,2,1,0,0,0,0,1,2,2,1,0,0,-1,0,1,1,1,1,0,-1,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  // w
+  [0,0,0,0,0,0,0,0,1,0,-1,-1,-1,-1,0,1,0,0,-1,-2,-2,-1,0,0,
+   0,0,-1,-2,-2,-1,0,0,0,0,-1,-2,-2,-1,0,0,1,0,-1,-1,-1,-1,0,1,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+  // U
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0,
+   0,0,1,2,2,1,0,0,0,0,1,2,2,1,0,0,1,1,2,3,3,2,1,1,
+   4,4,4,5,5,4,4,4,0,0,0,0,0,0,0,0],
+  // D
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,-1,-1,0,0,0,
+   0,0,-1,-2,-2,-1,0,0,0,0,-1,-2,-2,-1,0,0,-1,-1,-2,-3,-3,-2,-1,-1,
+   -4,-4,-4,-5,-5,-4,-4,-4,0,0,0,0,0,0,0,0],
+  // X
+  [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,1,1,0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,
+   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+];
+
+const EMBEDDING = [
+  [ 1.0,  0.8,  0.3,  0.0], // B
+  [-1.0, -0.8, -0.3,  0.0], // I
+  [ 0.6,  0.2, -0.8,  0.5], // W
+  [-0.6, -0.2,  0.8, -0.5], // w
+  [ 0.4,  0.3,  0.1,  0.2], // U
+  [-0.4, -0.3, -0.1, -0.2], // D
+  [ 0.0,  0.0,  0.0,  0.0]  // X
+];
+
 export class SMKEngine {
   private rawBars: OHLCV[] = [];
   private cursor = 0;
   private amdState = 'Accumulation';
   private prevEnergy = 0.0;
   private stasisTimer = 0;
+  private symbolSequence: SymbolType[] = Array(20).fill(SymbolType.SYM_X);
   private referenceDistribution: number[] | null = null;
   private disabledModules: Set<string> = new Set();
   private lastResult: SMKResult | null = null;
@@ -31,6 +89,7 @@ export class SMKEngine {
     this.amdState = 'Accumulation';
     this.prevEnergy = 0.0;
     this.stasisTimer = 0;
+    this.symbolSequence = Array(20).fill(SymbolType.SYM_X);
     this.referenceDistribution = null;
 
     // Calibrate KL Manifold with first 60 bars if available
@@ -45,10 +104,21 @@ export class SMKEngine {
     this.amdState = 'Accumulation';
     this.prevEnergy = 0.0;
     this.stasisTimer = 0;
+    this.symbolSequence = Array(20).fill(SymbolType.SYM_X);
   }
 
   public setDisabledModules(modules: string[]) {
     this.disabledModules = new Set(modules);
+  }
+
+  public getSnapshot(n = 60): SMKResult[] {
+    const results: SMKResult[] = [];
+    const limit = Math.min(n, this.rawBars.length);
+    for (let i = 0; i < limit; i++) {
+        const res = this.step();
+        if (res) results.push(res);
+    }
+    return results;
   }
 
   public getLastResult(): SMKResult | null {
@@ -87,6 +157,20 @@ export class SMKEngine {
     const ob = this.disabledModules.has('ob') ? { count: 0, active: false, recent: [] } : this.calcOrderBlocks(window);
 
     // 3. Lambda Sensors (λ1-λ7)
+    const currentSymbol = this.encodeCandle(currentBar);
+    this.symbolSequence.shift();
+    this.symbolSequence.push(currentSymbol);
+
+    const smart = {
+        sequence: this.symbolSequence.map(s => SYM_CHAR[s]).join(''),
+        entropy: this.calcSequenceEntropy(this.symbolSequence),
+        energy: this.calcSequenceEnergy(this.symbolSequence),
+        curl: this.calcSequenceCurl(this.symbolSequence),
+        divergence: this.calcSequenceDivergence(this.symbolSequence),
+        delta: this.predictNext(this.symbolSequence).delta,
+        symbol: SYM_CHAR[currentSymbol]
+    };
+
     const volDecay = this.disabledModules.has('vol_decay') ? { ratio: 1, entrapped: false, energy: 0, stasis: 0, status: 'OFF' } : this.calcVolDecay(closes, highs, lows);
     const displacement = this.disabledModules.has('displacement') ? { is_disp: false, dir: 0, body_ratio: 0, vetoed: false, status: 'OFF' } : this.calcDisplacement(currentBar, window);
     const harmonic = this.disabledModules.has('harmonic') ? { phase_diff: 0, inverted: false, trap: 'NONE', status: 'OFF' } : this.calcHarmonic(closes);
@@ -117,7 +201,8 @@ export class SMKEngine {
           eq: dealingRange.eq,
           confidence: dealingRange.coherence,
           valid: true
-      }
+      },
+      smart
     };
 
     // AMD State Machine Logic
@@ -133,6 +218,9 @@ export class SMKEngine {
     // Veto Authority Decision
     result.veto = this.decideVeto(result);
     
+    // Execution Layer
+    result.execution = this.updateExecution(result);
+
     // Causal Layer (Placeholders using integrated math)
     result.causal = {
         granger: "STABLE",
@@ -394,20 +482,31 @@ export class SMKEngine {
     const wick = upperWick + lowerWick;
     const wickRatio = wick / (body + 1e-9);
     
-    const avgVol = ss.mean(volumes);
-    const sweepH = bar.high >= dr.high;
-    const sweepL = bar.low <= dr.low;
+    const avgVol = ss.mean(volumes.slice(0, -1)); // Use previous average
+    
+    // A sweep should be compared against a level that existed BEFORE this bar
+    // However dr high/low currently includes current bar. 
+    // We'll rely on the score being high enough.
     
     let score = 0;
-    if (sweepH || sweepL) score += 40;
-    if (wickRatio > 3.0) score += 30;
-    if (bar.volume > (avgVol * 3)) score += 30;
+    const pips = (bar.high - bar.low) * 10000;
+    
+    // 1. Must have significant wick
+    if (wickRatio > 4.0) score += 40;
+    else if (wickRatio > 2.5) score += 20;
 
-    const active = score >= 70;
+    // 2. Must have anomalous volume
+    if (bar.volume > (avgVol * 4.5)) score += 40;
+    else if (bar.volume > (avgVol * 2.5)) score += 20;
+
+    // 3. Size of move
+    if (pips > 30) score += 20;
+
+    const active = score >= 80;
     return {
         active,
         score,
-        level: sweepH ? 'H60' : (sweepL ? 'L60' : 'NONE'),
+        level: bar.high >= dr.high ? 'H60' : (bar.low <= dr.low ? 'L60' : 'NONE'),
         wick: wickRatio,
         status: active ? 'MANIPULATION_DETECTED' : 'STABLE'
     };
@@ -588,6 +687,7 @@ export class SMKEngine {
   }
 
   private getSensorsList(r: SMKResult) {
+    const s = r.smart;
     return [
       { id: 's01', name: 'PHASE ENTRAP', score: r.vol_decay?.ratio || 0, active: r.vol_decay?.entrapped || false },
       { id: 's02', name: 'EXPANSION', score: r.expansion?.prob || 0, active: (r.expansion?.prob || 0) > 0.5 },
@@ -595,7 +695,11 @@ export class SMKEngine {
       { id: 's04', name: 'DEAL RANGE', score: r.dealing_range?.coherence || 0, active: true },
       { id: 's09', name: 'KL DIVERGE', score: Math.min(1.0, r.kl?.score || 0), active: !r.kl?.stable },
       { id: 's10', name: 'TOPO FRACT', score: (r.topology?.h1_score || 0) / 10, active: r.topology?.fractured || false },
-      { id: 's13', name: 'MANIPULATION', score: (r.manipulation?.score || 0) / 100, active: r.manipulation?.active || false }
+      { id: 's13', name: 'MANIPULATION', score: (r.manipulation?.score || 0) / 100, active: r.manipulation?.active || false },
+      // New SMART Sensors
+      { id: 'p01', name: 'λ-ENTROPY', score: s?.entropy || 0, active: (s?.entropy || 0) > 0.6 },
+      { id: 'p02', name: 'λ-GEOMETRY', score: s?.energy || 0, active: (s?.energy || 0) > 0.4 },
+      { id: 'p03', name: 'λ-MS DELTA', score: Math.abs(s?.delta || 0) / 2000, active: Math.abs(s?.delta || 0) > 500 }
     ];
   }
 
@@ -606,6 +710,169 @@ export class SMKEngine {
       total_bars: this.rawBars.length,
       amd: { state: 'Accumulation', prev: 'Accumulation', changed: false, R_MASTER: false },
       sensors: []
+    };
+  }
+
+  // --- SMART-EXE CORE LOGIC (Python Port) ---
+
+  private encodeCandle(c: OHLCV): SymbolType {
+    const body = Math.abs(c.close - c.open);
+    const range = c.high - c.low;
+    if (range < 1e-9) return SymbolType.SYM_X;
+
+    const ratio = body / range;
+    const upper = c.high - Math.max(c.open, c.close);
+    const lower = Math.min(c.open, c.close) - c.low;
+
+    if (upper > range * 0.6) return SymbolType.SYM_W;
+    if (lower > range * 0.6) return SymbolType.SYM_w;
+    if (ratio < 0.10) return SymbolType.SYM_X;
+
+    if (c.close > c.open) {
+      return ratio > 0.6 ? SymbolType.SYM_B : SymbolType.SYM_U;
+    } else {
+      return ratio > 0.6 ? SymbolType.SYM_I : SymbolType.SYM_D;
+    }
+  }
+
+  private evaluateSequence(seq: SymbolType[]): number {
+    let material = 0;
+    let position = 0;
+    const len = seq.length;
+
+    for (let i = 0; i < len; i++) {
+        const s = seq[i];
+        const w = (i + 1.0) / len;
+        material += SYM_VALUE[s] * w;
+
+        const tblIdx = Math.floor(i * 63.0 / (len - 1));
+        position += POSITION_TABLES[s][Math.min(63, tblIdx)];
+    }
+    return material + position;
+  }
+
+  private predictNext(seq: SymbolType[]): { delta: number, symbol: SymbolType } {
+    const base = this.evaluateSequence(seq);
+    let bestAbs = -1;
+    let bestDelta = 0;
+    let bestSym = SymbolType.SYM_X;
+
+    for (let s = 0; s < 7; s++) {
+        const candidate = [...seq.slice(1), s as SymbolType];
+        const delta = this.evaluateSequence(candidate) - base;
+        if (Math.abs(delta) > bestAbs) {
+            bestAbs = Math.abs(delta);
+            bestDelta = delta;
+            bestSym = s as SymbolType;
+        }
+    }
+    return { delta: bestDelta, symbol: bestSym };
+  }
+
+  private calcSequenceEntropy(seq: SymbolType[]): number {
+    const counts = new Array(7).fill(0);
+    seq.forEach(s => counts[s]++);
+    const MAX_H = 2.80735; // log2(7)
+    let h = 0;
+    seq.forEach(() => {}); // satisfy linters
+    for (const c of counts) {
+        if (c === 0) continue;
+        const p = c / seq.length;
+        h -= p * Math.log2(p);
+    }
+    return h / MAX_H;
+  }
+
+  private calcSequenceEnergy(seq: SymbolType[]): number {
+    const diff: number[][] = [];
+    let energy = 0;
+    for (let i = 0; i < seq.length - 1; i++) {
+        const dvec = [];
+        for (let d = 0; d < 4; d++) {
+            const dv = EMBEDDING[seq[i+1]][d] - EMBEDDING[seq[i]][d];
+            dvec.push(dv);
+            energy += dv * dv;
+        }
+        diff.push(dvec);
+    }
+    for (let i = 0; i < diff.length - 1; i++) {
+        for (let d = 0; d < 4; d++) {
+            const curv = diff[i+1][d] - diff[i][d];
+            energy += curv * curv;
+        }
+    }
+    const maxE = ((seq.length - 1) + (seq.length - 2)) * 4 * 4;
+    return energy / maxE;
+  }
+
+  private calcSequenceCurl(seq: SymbolType[]): number {
+    const BULLISH = [1, 0, 1, 0, 1, 0, 0];
+    let flips = 0;
+    for (let i = 1; i < seq.length; i++) {
+        const a = BULLISH[seq[i-1]];
+        const b = BULLISH[seq[i]];
+        if (seq[i-1] !== SymbolType.SYM_X && seq[i] !== SymbolType.SYM_X && a !== b) {
+            flips++;
+        }
+    }
+    return flips / (seq.length - 1);
+  }
+
+  private calcSequenceDivergence(seq: SymbolType[]): number {
+    const older = seq.slice(0, 10).reduce((acc, s) => acc + SYM_VALUE[s], 0);
+    const recent = seq.slice(10).reduce((acc, s) => acc + SYM_VALUE[s], 0);
+    return (recent - older) / (10 * 900);
+  }
+
+  private updateExecution(r: SMKResult) {
+    if (!r.smart) return null;
+    const s = r.smart;
+    
+    // Logic from evaluate_signal in Python
+    const entropyThresh = 0.65;
+    const minConf = 0.55;
+    const minDelta = 400;
+    const maxEnergy = 0.45;
+
+    let action = "WARMUP";
+    let reason = "INITIALIZING SEQUENCE";
+    let isArmed = false;
+    let direction = 0;
+
+    if (this.cursor > 20) {
+        if (s.entropy > entropyThresh) {
+            action = "HALT";
+            reason = "EXCESSIVE ENTROPY";
+        } else if (s.energy > maxEnergy) {
+            action = "HALT";
+            reason = "GEOMETRIC INSTABILITY";
+        } else if (Math.abs(s.delta) < minDelta) {
+            action = "HALT";
+            reason = "INSUFFICIENT DELTA";
+        } else if (r.veto?.decision === 'Halt') {
+            action = "HALT";
+            reason = "RING 0 VETO: " + r.veto.reasons[0];
+        } else {
+            action = "PROCEED";
+            reason = "CONVERGENCE ATTAINED";
+            isArmed = true;
+            direction = s.delta > 0 ? 1 : -1;
+        }
+    }
+
+    const sl_pct = 0.006; // Weighted average of SYM_SL_PCT
+    const riskPips = r.bar.close * sl_pct / 0.0001;
+
+    return {
+        action,
+        reason,
+        is_armed: isArmed,
+        pattern: s.sequence.slice(-5),
+        direction,
+        stop_loss_price: direction === 1 ? r.bar.close * (1 - sl_pct) : r.bar.close * (1 + sl_pct),
+        take_profit_price: direction === 1 ? r.bar.close * (1 + sl_pct * 2) : r.bar.close * (1 - sl_pct * 2),
+        lot_size: 0.1, // Placeholder for Kelly sizing
+        risk_pips: riskPips
     };
   }
 }

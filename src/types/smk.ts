@@ -131,5 +131,25 @@ export interface SMKResult {
     reasons: string[];
     trade_allowed: boolean;
   };
+  smart?: {
+    sequence: string;
+    entropy: number;
+    energy: number;
+    curl: number;
+    divergence: number;
+    delta: number;
+    symbol: string;
+  };
+  execution?: {
+    action: string;
+    reason: string;
+    is_armed: boolean;
+    pattern: string;
+    direction: number;
+    stop_loss_price: number;
+    take_profit_price: number;
+    lot_size: number;
+    risk_pips: number;
+  };
   sensors?: Array<{ id: string; name: string; score: number; active: boolean }>;
 }
