@@ -77,6 +77,14 @@ class SMKPipeline:
         self.stasis_timer = 0
         self.modules = {}
         self._import_errors = []
+        # Reversal Model Manager
+        try:
+            from reversal_manager import ReversalModelManager
+            self.reversal_manager = ReversalModelManager(os.path.join(_backend_dir, "models"))
+        except Exception as e:
+            print(f"[SMK] Reversal manager not available: {e}")
+            self.reversal_manager = None
+
         self._load_modules()
 
     def _load_modules(self):
@@ -105,6 +113,15 @@ class SMKPipeline:
         try_load('mandra',       lambda: _imp('risk.mandra_kernels', 'MandraGate')())
         try_load('topology',     lambda: _imp('detectors.topological_fracture_detector', 'TopologicalFractureDetector')())
         
+        # Order Flow Visibility Engine
+        try:
+            from order_flow_visibility_engine import OrderFlowVisibilityEngine
+            self.modules['order_flow'] = OrderFlowVisibilityEngine()
+            print('[SMK] OrderFlowVisibilityEngine loaded OK')
+        except Exception as e:
+            self._import_errors.append(f'order_flow: {e}')
+            self.modules['order_flow'] = None
+        
         # Causality Engines
         try_load('granger',      lambda: _imp('causality.granger_causality', 'GrangerCausalityDetector')())
         try_load('transfer',     lambda: _imp('causality.transfer_entropy', 'TransferEntropyEngine')())
@@ -117,6 +134,19 @@ class SMKPipeline:
             print(f'[SMK] {len(ok)} modules OK, {len(bad)} failed')
         else:
             print(f'[SMK] All {len(ok)} modules loaded OK')
+
+    def load_historical_csv(self, file_path: str):
+        """Loads bars from the user-specified historical CSV format."""
+        try:
+            from data_loader import parse_historical_csv
+            bars = parse_historical_csv(file_path)
+            if bars:
+                self.load_bars(bars)
+                print(f"[SMK] Loaded {len(bars)} bars from {file_path}")
+            return len(bars)
+        except Exception as e:
+            print(f"[SMK] Failed to load historical CSV: {e}")
+            return 0
 
     def load_bars(self, bars):
         self.raw_bars = bars
@@ -157,6 +187,42 @@ class SMKPipeline:
                 'modules_ok': [k for k, v in self.modules.items() if v is not None],
                 'modules_failed': self._import_errors}
 
+    def _order_flow(self, bar, df):
+        mod = self.modules.get('order_flow')
+        if not mod:
+            return {'delta': 0, 'is_absorption': False, 'burst_density': 0, 'pulse': False, 'status': 'OFF'}
+        
+        # In a real system, we'd pull tick data from a buffer.
+        # Here we simulate/derive order flow from bar dynamics if no ticks present.
+        ticks = bar.get('ticks')
+        if ticks is None:
+            # Synthetic flow for demo/simulation
+            v = bar.get('volume', 100)
+            c = bar.get('close', 0); o = bar.get('open', 0); h = bar.get('high', 0); l = bar.get('low', 0)
+            body = abs(c - o)
+            rng = max(1e-9, h - l)
+            delta = v * (c - o) / rng if rng > 0 else 0
+            is_abs = (v > df['volume'].mean() * 1.5) and (body < df['atr'].iloc[-1] * 0.3)
+            return {
+                'delta': round(delta, 2),
+                'is_absorption': is_abs,
+                'burst_density': 0.1, # placeholder
+                'pulse': v > df['volume'].mean() * 2.0,
+                'status': 'SYNTHETIC'
+            }
+        
+        try:
+            telemetry = mod.process_candle_visibility(pd.DataFrame(ticks), bar)
+            return {
+                'delta': telemetry.delta,
+                'is_absorption': telemetry.is_absorption,
+                'burst_density': telemetry.burst_density,
+                'pulse': telemetry.institutional_pulse,
+                'status': telemetry.status
+            }
+        except Exception:
+            return {'delta': 0, 'is_absorption': False, 'burst_density': 0, 'pulse': False, 'status': 'ERROR'}
+
     def step(self):
         if self.cursor >= len(self.raw_bars):
             return None
@@ -196,6 +262,25 @@ class SMKPipeline:
         r['fusion']        = self._fusion(r)
         r['mandra']        = self._mandra(r)
         r['veto']          = self._veto(r)
+        r['order_flow']    = self._order_flow(cur, df)
+        
+        # Reversal Prediction
+        if getattr(self, 'reversal_manager', None):
+            try:
+                # Features: [Return, VolRatio, OF_Delta/Vol, KL_Score, Granger_Conf]
+                feats = [
+                    (df['close'].iloc[-1] / df['close'].iloc[-2] - 1) if len(df) > 1 else 0,
+                    (df['volume'].iloc[-1] / df['volume'].mean() - 1) if not df['volume'].empty else 0,
+                    r['order_flow']['delta'] / (cur['volume'] + 1e-9),
+                    r['kl']['score'],
+                    r['causality']['granger']['conf']
+                ]
+                r['reversal_prob'] = self.reversal_manager.predict(np.array(feats))
+            except:
+                r['reversal_prob'] = 0.5
+        else:
+            r['reversal_prob'] = 0.5
+
         r['sensors']       = self._sensors(r)
 
         # ── Plugin layer ──────────────────────────────────────────────────────
@@ -253,7 +338,22 @@ class SMKPipeline:
                         "delta_e": 0.0,
                         "rev_score": 0.0,
                     }
+                # Update P&L stats
+                entry = cur['close']
+                unrealized = 0
+                if bridge.active_trade:
+                    t = bridge.active_trade
+                    unrealized = (entry - t["entry"]) * t["direction"] * t["lot_size"] * 10000
+                
+                r['session_pnl'] = {
+                    'realized': round(bridge.session_pnl, 2),
+                    'unrealized': round(unrealized, 2),
+                    'total': round(bridge.session_pnl + unrealized, 2),
+                    'active': bridge.active_trade is not None
+                }
         except Exception as _be:
+            print(f"[SMK] AEGIS error: {_be}")
+            r['session_pnl'] = {'realized':0, 'unrealized':0, 'total':0, 'active':False}
             r['execution'] = {"action": "HALT", "reason": str(_be), "is_armed": False,
                               "lot_size": 0.0, "stop_loss_price": 0.0,
                               "take_profit_price": 0.0, "kelly_size": 0.0,

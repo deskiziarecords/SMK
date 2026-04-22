@@ -98,8 +98,8 @@ export interface SMKResult {
     status: string;
   };
   causality?: {
-    granger: { f_stat: number; p_val: number; significant: boolean; conf: number; lag: number };
-    transfer: { flow: number; threshold: number; significant: boolean };
+    granger: { p_value: number; significant: boolean; conf: number; lag: number };
+    transfer: { flow: number; p_value: number; significant: boolean };
     ccm: { rho: number; convergent: boolean };
     spearman: { rho: number; lag: number; significant: boolean };
   };
@@ -149,6 +149,20 @@ export interface SMKResult {
     take_profit_price: number;
     lot_size: number;
     risk_pips: number;
+  };
+  order_flow?: {
+    delta: number;
+    is_absorption: boolean;
+    burst_density: number;
+    pulse: boolean;
+    status: string;
+  };
+  reversal_prob?: number;
+  session_pnl?: {
+    realized: number;
+    unrealized: number;
+    total: number;
+    active: boolean;
   };
   sensors?: Array<{ id: string; name: string; score: number; active: boolean }>;
 }

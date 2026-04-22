@@ -83,6 +83,10 @@ export class SMKEngine {
 
   constructor() {}
 
+  public get bars(): OHLCV[] {
+    return this.rawBars;
+  }
+
   public loadBars(bars: OHLCV[]) {
     this.rawBars = bars;
     this.cursor = 0;
@@ -223,8 +227,8 @@ export class SMKEngine {
 
     // Causal Layer (Placeholders using integrated math)
     result.causality = {
-        granger: { f_stat: 1.2, p_val: 0.1, significant: false, conf: 0.9, lag: 3 },
-        transfer: { flow: 0.434, threshold: 0.1, significant: true },
+        granger: { p_value: 0.1, significant: false, conf: 0.9, lag: 3 },
+        transfer: { flow: 0.434, p_value: 0.1, significant: true },
         ccm: { rho: 0.493, convergent: true },
         spearman: { rho: 0.852, lag: 2, significant: true }
     };

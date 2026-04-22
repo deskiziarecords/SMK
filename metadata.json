@@ -1,6 +1,6 @@
 {
   "name": "QUIMERIA / Sovereign Market Kernel",
-  "description": "Professional IPDA trading terminal with 18-module signal processing, AMD state machine, and Ring 0 veto authority.",
+  "description": "Professional IPDA trading terminal with 18-module signal processing, AMD state machine, Lead-Lag causality manifold, and Ring 0 veto authority.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["Real-time Data Ingestion", "Signal Fusion", "IPDA AMD State Machine"]
+  "majorCapabilities": ["Real-time Data Ingestion", "Signal Fusion", "IPDA AMD State Machine", "Lead-Lag Causality", "Historical CSV Analysis"]
 }

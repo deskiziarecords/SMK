@@ -69,21 +69,31 @@ async function startServer() {
       const lines = text.split(/\r?\n/).filter((l: string) => l.trim().length > 0);
       const bars: OHLCV[] = [];
 
+      // Detect delimiter
+      const firstLine = lines[0];
+      const delimiter = firstLine.includes(';') ? ';' : ',';
+
       // Basic heuristic: check if first line is header
       let startIdx = 0;
-      if (isNaN(parseFloat(lines[0].split(/[;,]/)[0]))) {
+      const firstParts = lines[0].split(delimiter);
+      if (isNaN(parseFloat(firstParts[1]))) {
         startIdx = 1;
       }
 
       for (let i = startIdx; i < lines.length; i++) {
-        const parts = lines[i].split(/[;,]/); // support both comma and semicolon
+        const parts = lines[i].split(delimiter); 
         if (parts.length < 5) continue;
 
         let timeValue = parts[0].trim();
         let timestamp = 0;
 
-        // Handle various date/time formats
-        if (timeValue.includes('-') || timeValue.includes('/')) {
+        // Custom parser for "24.03.2026 12:00:00.000 UTC"
+        const historicalMatch = timeValue.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\.(\d{3})/);
+        
+        if (historicalMatch) {
+            const [_, d, m, y, hh, mm, ss, ms] = historicalMatch;
+            timestamp = Math.floor(new Date(`${y}-${m}-${d}T${hh}:${mm}:${ss}.${ms}Z`).getTime() / 1000);
+        } else if (timeValue.includes('-') || timeValue.includes('/')) {
             timestamp = Math.floor(new Date(timeValue).getTime() / 1000);
         } else {
             // Assume unix timestamp (could be ms or s)
@@ -91,7 +101,7 @@ async function startServer() {
             if (timestamp > 9999999999) timestamp = Math.floor(timestamp / 1000);
         }
 
-        if (isNaN(timestamp)) continue;
+        if (isNaN(timestamp) || timestamp === 0) continue;
 
         bars.push({
           time: timestamp,
@@ -103,6 +113,10 @@ async function startServer() {
         });
       }
 
+      if (bars.length === 0) {
+        throw new Error('No valid bars found in CSV');
+      }
+
       const sortedBars = bars.sort((a, b) => a.time - b.time);
       const uniqueBars = sortedBars.filter((b, i, self) => i === 0 || b.time > self[i - 1].time);
       
@@ -110,6 +124,7 @@ async function startServer() {
       const snapshot = engine.getSnapshot(100);
       res.json({ status: 'ok', count: uniqueBars.length, snapshot });
     } catch (err: any) {
+      console.error("[CSV LOAD ERROR]", err);
       res.status(500).json({ status: 'error', message: err.message });
     }
   });
@@ -122,6 +137,21 @@ async function startServer() {
     } else {
       res.status(400).json({ status: 'error', message: 'Invalid configuration' });
     }
+  });
+
+  // --- MODEL MANAGEMENT ---
+  app.post('/api/model/select', (req, res) => {
+    const { name } = req.body;
+    // For the TS engine, we can simulate switching
+    console.log(`[MODEL] Selecting ${name}`);
+    res.json({ status: 'ok', active: name });
+  });
+
+  app.post('/api/model/train', (req, res) => {
+    const { name, data } = req.body;
+    console.log(`[MODEL] Retraining ${name} with ${data?.length || 0} points`);
+    // In a real system, this would trigger the Python trainer
+    res.json({ status: 'training_started', model: name });
   });
 
   // MCP ENDPOINTS for Model Monitoring
@@ -144,7 +174,62 @@ async function startServer() {
   });
 
   // --- WEBSOCKET HANDLING ---
+  const clients = new Set<WebSocket>();
+  
+  // LIVE FEED POLLER (Bitget every 5 seconds)
+  let livePoller: NodeJS.Timeout | null = null;
+  let lastLiveTs = 0;
+
+  function stopLiveFeed() {
+    if (livePoller) {
+      clearInterval(livePoller);
+      livePoller = null;
+    }
+  }
+
+  function startLiveFeed(symbol: string, granularity: string) {
+    stopLiveFeed();
+    console.log(`[LIVE] Starting Bitget poller: ${symbol} ${granularity}`);
+    
+    livePoller = setInterval(async () => {
+      try {
+        const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=5`;
+        const r = await fetch(url);
+        const data: any = await r.json();
+        if (data.code === '00000' && data.data) {
+          const bars: OHLCV[] = data.data.map((c: any) => ({
+            time: Math.floor(parseInt(c[0]) / 1000),
+            open: parseFloat(c[1]),
+            high: parseFloat(c[2]),
+            low: parseFloat(c[3]),
+            close: parseFloat(c[4]),
+            volume: parseFloat(c[5])
+          })).sort((a: any, b: any) => a.time - b.time);
+
+          const newBars = bars.filter(b => b.time > lastLiveTs);
+          for (const bar of newBars) {
+            // Check if bar is closed (roughly)
+            // Bitget granularity is in minutes or hours.
+            // For now, we'll just feed any new bar to the engine and broadcast.
+            engine.loadBars([...engine.bars, bar]); 
+            const result = engine.step(); // This logic might need refinement for "latest" bar
+            if (result) {
+              const payload = JSON.stringify({ type: 'bar', data: { ...result, live: true } });
+              clients.forEach(c => {
+                if (c.readyState === WebSocket.OPEN) c.send(payload);
+              });
+            }
+            lastLiveTs = bar.time;
+          }
+        }
+      } catch (err) {
+        console.error("[LIVE ERROR]", err);
+      }
+    }, 5000);
+  }
+
   wss.on('connection', (ws) => {
+    clients.add(ws);
     let running = false;
     let interval: NodeJS.Timeout | null = null;
 
@@ -165,6 +250,10 @@ async function startServer() {
             if (interval) clearInterval(interval);
           }
         }, speed);
+      } else if (msg.action === 'start_live') {
+        startLiveFeed(msg.symbol || 'BTCUSDT', msg.granularity || '1min');
+      } else if (msg.action === 'stop_live') {
+        stopLiveFeed();
       } else if (msg.action === 'stop') {
         running = false;
         if (interval) clearInterval(interval);
@@ -179,6 +268,7 @@ async function startServer() {
     });
 
     ws.on('close', () => {
+      clients.delete(ws);
       if (interval) clearInterval(interval);
     });
   });
