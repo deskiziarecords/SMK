@@ -3,19 +3,18 @@ import { createServer } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { SMKEngine } from './src/lib/smk-engine';
-import { OHLCV } from './src/types/smk';
 import fetch from 'node-fetch';
 import dotenv from 'dotenv';
 
 import { createServer as createViteServer } from 'vite';
 
-import { generateSyntheticData } from './src/lib/data-utils';
-
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const PYTHON_BACKEND = 'http://localhost:8000';
+const PYTHON_WS = 'ws://localhost:8000/ws/stream';
 
 async function startServer() {
   const app = express();
@@ -23,178 +22,108 @@ async function startServer() {
   const wss = new WebSocketServer({ server: httpServer });
 
   const PORT = 3000;
-  const engine = new SMKEngine();
 
   app.use(express.json({ limit: '10mb' }));
 
-  // --- API ROUTES ---
-  app.post('/api/load/sample', (req, res) => {
-    const bars = generateSyntheticData(400);
-    engine.loadBars(bars);
-    const snapshot = engine.getSnapshot(100);
-    res.json({ status: 'ok', count: bars.length, source: 'synthetic', snapshot });
-  });
-
-  app.post('/api/load/bitget', async (req, res) => {
-    const { symbol = 'BTCUSDT', granularity = '5min', limit = 300 } = req.body;
+  // Helper for proxying to Python backend
+  const proxyToPython = async (req: express.Request, res: express.Response, path: string) => {
     try {
-      const url = `https://api.bitget.com/api/v2/spot/market/candles?symbol=${symbol}&granularity=${granularity}&limit=${limit}`;
-      const response = await fetch(url);
+      const response = await fetch(`${PYTHON_BACKEND}${path}`, {
+        method: req.method,
+        headers: { 'Content-Type': 'application/json' },
+        body: req.method !== 'GET' ? JSON.stringify(req.body) : undefined
+      });
       const data: any = await response.json();
-      if (!data.data) throw new Error(data.msg || 'No data from Bitget');
       
-      const bars: OHLCV[] = data.data.map((c: any) => ({
-        time: Math.floor(parseInt(c[0]) / 1000),
-        open: parseFloat(c[1]),
-        high: parseFloat(c[2]),
-        low: parseFloat(c[3]),
-        close: parseFloat(c[4]),
-        volume: parseFloat(c[5])
-      })).sort((a: any, b: any) => a.time - b.time);
-
-      const uniqueBars = bars.filter((b, i, self) => i === 0 || b.time > self[i - 1].time);
-      engine.loadBars(uniqueBars);
-      const snapshot = engine.getSnapshot(100);
-      res.json({ status: 'ok', count: uniqueBars.length, source: `bitget:${symbol}`, snapshot });
-    } catch (err: any) {
-      res.status(500).json({ status: 'error', message: err.message });
-    }
-  });
-
-  app.post('/api/load/csv', (req, res) => {
-    const { text } = req.body;
-    if (!text) return res.status(400).json({ status: 'error', message: 'No CSV content provided' });
-
-    try {
-      const lines = text.split(/\r?\n/).filter((l: string) => l.trim().length > 0);
-      const bars: OHLCV[] = [];
-
-      // Detect delimiter
-      const firstLine = lines[0];
-      const delimiter = firstLine.includes(';') ? ';' : ',';
-
-      // Basic heuristic: check if first line is header
-      let startIdx = 0;
-      const firstParts = lines[0].split(delimiter);
-      if (isNaN(parseFloat(firstParts[1]))) {
-        startIdx = 1;
-      }
-
-      for (let i = startIdx; i < lines.length; i++) {
-        const parts = lines[i].split(delimiter); 
-        if (parts.length < 5) continue;
-
-        let timeValue = parts[0].trim();
-        let timestamp = 0;
-
-        // Custom parser for "24.03.2026 12:00:00.000 UTC"
-        const historicalMatch = timeValue.match(/(\d{2})\.(\d{2})\.(\d{4})\s+(\d{2}):(\d{2}):(\d{2})\.(\d{3})/);
-        
-        if (historicalMatch) {
-            const [_, d, m, y, hh, mm, ss, ms] = historicalMatch;
-            timestamp = Math.floor(new Date(`${y}-${m}-${d}T${hh}:${mm}:${ss}.${ms}Z`).getTime() / 1000);
-        } else if (timeValue.includes('-') || timeValue.includes('/')) {
-            timestamp = Math.floor(new Date(timeValue).getTime() / 1000);
-        } else {
-            // Assume unix timestamp (could be ms or s)
-            timestamp = parseFloat(timeValue);
-            if (timestamp > 9999999999) timestamp = Math.floor(timestamp / 1000);
+      // If loading data, we also want to return a snapshot of the first 100 bars
+      // Since the Python backend doesn't provide this by default, we'll fetch it from the new endpoint
+      if (path.startsWith('/api/load/') && data.status === 'ok') {
+        try {
+          const snapshotResp = await fetch(`${PYTHON_BACKEND}/api/snapshot?limit=100`);
+          if (snapshotResp.ok) {
+             data.snapshot = await snapshotResp.json();
+          }
+        } catch(snapErr) {
+          console.error("[SNAPSHOT PROXY ERROR]", snapErr);
         }
-
-        if (isNaN(timestamp) || timestamp === 0) continue;
-
-        bars.push({
-          time: timestamp,
-          open: parseFloat(parts[1]),
-          high: parseFloat(parts[2]),
-          low: parseFloat(parts[3]),
-          close: parseFloat(parts[4]),
-          volume: parts[5] ? parseFloat(parts[5]) : 0
-        });
       }
 
-      if (bars.length === 0) {
-        throw new Error('No valid bars found in CSV');
-      }
-
-      const sortedBars = bars.sort((a, b) => a.time - b.time);
-      const uniqueBars = sortedBars.filter((b, i, self) => i === 0 || b.time > self[i - 1].time);
-      
-      engine.loadBars(uniqueBars);
-      const snapshot = engine.getSnapshot(100);
-      res.json({ status: 'ok', count: uniqueBars.length, snapshot });
+      res.status(response.status).json(data);
     } catch (err: any) {
-      console.error("[CSV LOAD ERROR]", err);
+      console.error(`[PROXY ERROR] ${path}`, err);
       res.status(500).json({ status: 'error', message: err.message });
     }
-  });
+  };
 
-  app.post('/api/config/modules', (req, res) => {
-    const { disabled_modules } = req.body;
-    if (Array.isArray(disabled_modules)) {
-      engine.setDisabledModules(disabled_modules);
-      res.json({ status: 'ok', disabled: disabled_modules.length });
-    } else {
-      res.status(400).json({ status: 'error', message: 'Invalid configuration' });
-    }
-  });
+  // --- API ROUTES ---
+  app.post('/api/load/sample', (req, res) => proxyToPython(req, res, '/api/load/sample'));
+  app.post('/api/load/bitget', (req, res) => proxyToPython(req, res, '/api/load/bitget'));
+  app.post('/api/load/csv', (req, res) => proxyToPython(req, res, '/api/load/csv'));
+  app.post('/api/config/modules', (req, res) => proxyToPython(req, res, '/api/config/modules'));
 
   // MCP ENDPOINTS for Model Monitoring
-  app.get('/api/mcp/state', (req, res) => {
-    const lastResult = engine.getLastResult();
-    res.json({
-      timestamp: Date.now(),
-      engine_status: lastResult ? 'ACTIVE' : 'IDLE',
-      current_state: lastResult || null,
-      mcp_node: 'Node-01-Alpha'
-    });
+  app.get('/api/mcp/state', async (req, res) => {
+    try {
+        const response = await fetch(`${PYTHON_BACKEND}/api/status`);
+        const status: any = await response.json();
+        res.json({
+            timestamp: Date.now(),
+            engine_status: status.bars_loaded > 0 ? 'ACTIVE' : 'IDLE',
+            current_state: null,
+            mcp_node: 'Node-01-Alpha-Python'
+        });
+    } catch(err) {
+        res.status(500).json({ status: 'error' });
+    }
   });
 
   app.post('/api/mcp/command', (req, res) => {
     const { action, params } = req.body;
-    // This allows an external model to inject commands into the engine stream
-    // For now, we log it and can extend to server-side trade execution
     console.log(`[MCP COMMAND] ${action}`, params);
     res.json({ status: 'received', action });
   });
 
   // --- WEBSOCKET HANDLING ---
   wss.on('connection', (ws) => {
-    let running = false;
-    let interval: NodeJS.Timeout | null = null;
+    console.log("[WS] Client connected, establishing link to Python backend...");
+    const pythonWs = new WebSocket(PYTHON_WS);
 
-    ws.on('message', async (data) => {
-      const msg = JSON.parse(data.toString());
-      
-      if (msg.action === 'run') {
-        running = true;
-        const speed = Math.max(16, msg.speed || 300);
-        if (interval) clearInterval(interval);
-        interval = setInterval(() => {
-          if (!running) return;
-          const result = engine.step();
-          if (result) {
-            ws.send(JSON.stringify({ type: 'bar', data: result }));
-          } else {
-            ws.send(JSON.stringify({ type: 'done' }));
-            if (interval) clearInterval(interval);
-          }
-        }, speed);
-      } else if (msg.action === 'stop') {
-        running = false;
-        if (interval) clearInterval(interval);
-      } else if (msg.action === 'step') {
-        const result = engine.step();
-        if (result) ws.send(JSON.stringify({ type: 'bar', data: result }));
-        else ws.send(JSON.stringify({ type: 'done' }));
-      } else if (msg.action === 'reset') {
-        engine.reset();
-        ws.send(JSON.stringify({ type: 'reset' }));
+    pythonWs.on('open', () => {
+      console.log("[WS] Python backend link established");
+    });
+
+    pythonWs.on('message', (data) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(data.toString());
+      }
+    });
+
+    pythonWs.on('error', (err) => {
+      console.error("[WS] Python backend error:", err.message);
+      ws.send(JSON.stringify({ type: 'error', message: 'Python backend connection error' }));
+    });
+
+    pythonWs.on('close', () => {
+      console.log("[WS] Python backend connection closed");
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+    });
+
+    ws.on('message', (data) => {
+      if (pythonWs.readyState === WebSocket.OPEN) {
+        pythonWs.send(data.toString());
+      } else if (pythonWs.readyState === WebSocket.CONNECTING) {
+        // Simple buffer or just wait
+        console.warn("[WS] Python backend still connecting, dropping message");
       }
     });
 
     ws.on('close', () => {
-      if (interval) clearInterval(interval);
+      console.log("[WS] Client disconnected");
+      if (pythonWs.readyState === WebSocket.OPEN || pythonWs.readyState === WebSocket.CONNECTING) {
+        pythonWs.close();
+      }
     });
   });
 
@@ -219,4 +148,3 @@ async function startServer() {
 }
 
 startServer();
-
