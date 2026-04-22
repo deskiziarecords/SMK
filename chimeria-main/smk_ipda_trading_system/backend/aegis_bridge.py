@@ -256,10 +256,15 @@ class AegisBridge:
                 self.active_trade = None
                 return _null_exe(reason)
 
+        # Derive sequence even if vetoed
+        sequence  = self._tokenizer.sequence(bars, n=8)
+
         # Only evaluate on PROCEED decisions
         veto = smk.get("veto", {})
         if veto.get("decision") != "Proceed":
-            return _null_exe(f"VETO:{veto.get('decision','UNKNOWN')}")
+            res = _null_exe(f"VETO:{veto.get('decision','UNKNOWN')}")
+            res["pattern"] = sequence
+            return res
 
         direction = override_direction or _CLMTokenizer.direction_from_smk(smk)
 
@@ -339,9 +344,9 @@ class AegisBridge:
 
                 bar_payload = {
                     "close":    entry,
-                    "high":     float(bar.get("high", entry)),
-                    "low":      float(bar.get("low", entry)),
-                    "volume":   float(bar.get("volume", 100)),
+                    "high":     float(bar_curr.get("high", entry)),
+                    "low":      float(bar_curr.get("low", entry)),
+                    "volume":   float(bar_curr.get("volume", 100)),
                     "sigma":    {"Accumulation":0,"Manipulation":1,
                                  "Distribution":2,"Retracement":3}.get(amd_state, 0),
                     "phi":      confidence,

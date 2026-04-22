@@ -243,29 +243,16 @@ class SMKPipeline:
             if bridge:
                 # Feed ATR on every bar regardless of veto
                 bridge.update_atr(cur)
-                # Only run full evaluation on PROCEED bars
-                if r['veto']['decision'] == 'Proceed':
-                    exe = bridge.evaluate(r, self.raw_bars[:idx+1])
-                    r['execution'] = exe
-                else:
-                    r['execution'] = {
-                        "action": "HALT",
-                        "reason": r['veto']['decision'],
-                        "is_armed": False,
-                        "lot_size": 0.0,
-                        "stop_loss_price": 0.0,
-                        "take_profit_price": 0.0,
-                        "kelly_size": 0.0,
-                        "pattern": "",
-                        "dominant": "X",
-                        "direction": 0,
-                        "venue_allocation": [],
-                        "risk_profile": "",
-                        "risk_pips": 0.0,
-                        "rr_ratio": 0.0,
-                        "delta_e": 0.0,
-                        "rev_score": 0.0,
-                    }
+
+                # Full evaluation (including pattern recognition)
+                exe = bridge.evaluate(r, self.raw_bars[:idx+1])
+                r['execution'] = exe
+
+                # If vetoed, override action but keep the telemetry (pattern, etc.)
+                if r['veto']['decision'] != 'Proceed':
+                    r['execution']['action'] = "HALT"
+                    r['execution']['reason'] = r['veto']['decision']
+                    r['execution']['is_armed'] = False
         except Exception as _be:
             r['execution'] = {"action": "HALT", "reason": str(_be), "is_armed": False,
                               "lot_size": 0.0, "stop_loss_price": 0.0,
