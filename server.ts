@@ -88,10 +88,6 @@ async function startServer() {
     console.log("[WS] Client connected, establishing link to Python backend...");
     const pythonWs = new WebSocket(PYTHON_WS);
 
-    pythonWs.on('open', () => {
-      console.log("[WS] Python backend link established");
-    });
-
     pythonWs.on('message', (data) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(data.toString());
@@ -110,12 +106,25 @@ async function startServer() {
       }
     });
 
+    const messageBuffer: string[] = [];
+
     ws.on('message', (data) => {
+      const message = data.toString();
       if (pythonWs.readyState === WebSocket.OPEN) {
-        pythonWs.send(data.toString());
+        pythonWs.send(message);
       } else if (pythonWs.readyState === WebSocket.CONNECTING) {
-        // Simple buffer or just wait
-        console.warn("[WS] Python backend still connecting, dropping message");
+        console.log("[WS] Buffering message while Python backend connects");
+        messageBuffer.push(message);
+      } else {
+        console.warn("[WS] Python backend not open, dropping message");
+      }
+    });
+
+    pythonWs.on('open', () => {
+      console.log("[WS] Python backend link established");
+      while (messageBuffer.length > 0) {
+        const msg = messageBuffer.shift();
+        if (msg) pythonWs.send(msg);
       }
     });
 
