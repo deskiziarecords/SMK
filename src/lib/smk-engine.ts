@@ -68,6 +68,7 @@ export class SMKEngine {
   private symbolSequence: SymbolType[] = Array(20).fill(SymbolType.SYM_X);
   private referenceDistribution: number[] | null = null;
   private disabledModules: Set<string> = new Set();
+  private fingerprintHistory: string[] = [];
   private lastResult: SMKResult | null = null;
   private macroState = { regime: 'NEUTRAL', lambdaScore: 0.72, dxyTrend: 'flat' };
   private params = {
@@ -198,6 +199,8 @@ export class SMKEngine {
     const expansion = this.disabledModules.has('expansion') ? { prob: 0, entrapped: false, target: 0, status: 'OFF' } : this.calcExpansion(volDecay, dealingRange, session);
     const kl = this.disabledModules.has('kl') ? { score: 0, stable: true, status: 'OFF' } : this.calcKL(closes);
     const topology = this.disabledModules.has('topology') ? { h1_score: 0, fractured: false, islands: 0, status: 'OFF' } : this.calcTopology(closes, volumes);
+    const rhythm = this.calcRhythm(highs, lows, closes, bias.bias);
+    const seismology = this.calcSeismology(currentBar, window, this.amdState);
 
     const result: SMKResult = {
       bar: currentBar,
@@ -216,6 +219,8 @@ export class SMKEngine {
       expansion: expansion,
       kl: kl,
       topology: topology,
+      rhythm: rhythm,
+      seismology: seismology,
       ipda_phase: this.disabledModules.has('ipda') ? { phase: 'STASIS', eq: 0, confidence: 0, valid: false } : {
           phase: this.amdState,
           eq: dealingRange.eq,
@@ -597,6 +602,90 @@ export class SMKEngine {
         fractured,
         islands: Math.floor(score / 2),
         status: fractured ? 'GEOMETRY_FRACTURE' : 'COMPACT_CLOUD'
+    };
+  }
+
+  private calcRhythm(highs: number[], lows: number[], closes: number[], biasStr: string) {
+    if (closes.length < 3) return { 
+        tempo_bpm: 0, beat_count: 0, is_harmonic: true, phase_diff: 0, 
+        fingerprint: 'INITIALIZING', pattern_repeat: false, status: 'WARMUP' 
+    };
+
+    const swings_h = [];
+    const swings_l = [];
+    for (let i = 1; i < highs.length - 1; i++) {
+        if (highs[i] > highs[i - 1] && highs[i] > highs[i + 1]) swings_h.push(i);
+        if (lows[i] < lows[i - 1] && lows[i] < lows[i + 1]) swings_l.push(i);
+    }
+    const n_beats = swings_h.length + swings_l.length;
+    const tempo = n_beats / (closes.length / 128);
+
+    const harmonic = this.calcHarmonic(closes);
+    const diffs = [];
+    for(let i=1; i<closes.length; i++) diffs.push(closes[i] - closes[i-1]);
+    const meanD = ss.mean(diffs.slice(-16));
+    const fingerprint = diffs.slice(-16).map(v => v > meanD ? '1' : '0').join('');
+    
+    const repeat = this.fingerprintHistory.includes(fingerprint);
+    this.fingerprintHistory.push(fingerprint);
+    if (this.fingerprintHistory.length > 100) this.fingerprintHistory.shift();
+
+    return {
+        tempo_bpm: Number(tempo.toFixed(2)),
+        beat_count: n_beats,
+        is_harmonic: !harmonic.inverted,
+        phase_diff: harmonic.phase_diff,
+        fingerprint,
+        pattern_repeat: repeat,
+        status: harmonic.inverted ? 'DISSONANT:λ3_VETO' : 'IN_HARMONY'
+    };
+  }
+
+  private calcSeismology(bar: OHLCV, window: OHLCV[], amdState: string) {
+    const vol = window.map(b => b.volume);
+    const meanV = ss.mean(vol);
+    const stdV = ss.standardDeviation(vol) + 1e-9;
+    const zScore = (bar.volume - meanV) / stdV;
+    const hasPWave = zScore > 2.5;
+
+    const ranges = window.map(b => b.high - b.low);
+    const atr = ss.mean(ranges.slice(-20)) || 0.0001;
+    const body = Math.abs(bar.close - bar.open);
+    const rng = Math.max(1e-9, bar.high - bar.low);
+    const bodyRatio = body / rng;
+    const hasSWave = bodyRatio > 0.75 && (rng / atr) > 1.2;
+
+    const amdMap: Record<string, number> = { "Accumulation": 0, "Manipulation": 1, "Distribution": 2, "Retracement": 3 };
+    const sigmaT = amdMap[amdState] || 0;
+    const isExpanding = (sigmaT === 2 && hasSWave);
+
+    let eventType = "NOISE";
+    let magnitude = 0;
+    let status = "NOMINAL";
+
+    if (isExpanding) {
+        magnitude = Math.exp(Math.min(Math.log1p(rng / atr), 3.0));
+        eventType = "SURFACE_WAVE";
+        status = "EXPANSION_CRITICAL";
+    } else if (hasPWave && hasSWave) {
+        eventType = "S_WAVE";
+        magnitude = bodyRatio;
+        status = "DISPLACEMENT_CONFIRMED";
+    } else if (hasPWave) {
+        eventType = "P_WAVE";
+        magnitude = 0.35;
+        status = "INSTITUTIONAL_BURST";
+    }
+
+    return {
+        event_type: eventType,
+        magnitude: Number(magnitude.toFixed(4)),
+        is_epicenter: isExpanding || (hasPWave && hasSWave),
+        has_p_wave: hasPWave,
+        has_s_wave: hasSWave,
+        body_ratio: Number(bodyRatio.toFixed(4)),
+        phase: zScore > 1.5 ? "PHASE_SHIFT" : "STABLE_NOISE",
+        status: status
     };
   }
 

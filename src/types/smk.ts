@@ -151,4 +151,23 @@ export interface SMKResult {
     risk_pips: number;
   };
   sensors?: Array<{ id: string; name: string; score: number; active: boolean }>;
+  rhythm?: {
+    tempo_bpm: number;
+    beat_count: number;
+    is_harmonic: boolean;
+    phase_diff: number;
+    fingerprint: string;
+    pattern_repeat: boolean;
+    status: string;
+  };
+  seismology?: {
+    event_type: string;
+    magnitude: number;
+    is_epicenter: boolean;
+    has_p_wave: boolean;
+    has_s_wave: boolean;
+    body_ratio: number;
+    phase: string;
+    status: string;
+  };
 }

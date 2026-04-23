@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { GoogleGenAI } from "@google/genai";
 import { SMKResult } from './types/smk';
-import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3, Globe, Settings2 } from 'lucide-react';
+import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3, Globe, Settings2, Activity as Pulse, Zap } from 'lucide-react';
 import TradingViewWidget from './components/TradingViewWidget';
 import { QuimeriaTicker } from './components/QuimeriaTicker';
 import AssetKineticMatrix from './components/AssetKineticMatrix';
@@ -90,7 +90,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
-  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality' | 'heatmap'>('chart');
+  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality' | 'heatmap' | 'forensics'>('chart');
   const [configOpen, setConfigOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const [alignmentData, setAlignmentData] = useState<any[]>([]);
@@ -165,6 +165,9 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
   // Initial Chart
   useEffect(() => {
     if (!chartContainerRef.current) return;
+
+    // Live default: Load Bitget data on mount
+    loadData('bitget');
 
     const chart = createChart(chartContainerRef.current, {
       width: chartContainerRef.current.clientWidth,
@@ -900,6 +903,13 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 <LayoutGrid size={12} />
             </button>
             <button 
+                className={`btn ${viewMode === 'forensics' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                onClick={() => setViewMode('forensics')}
+                title="Market Forensics"
+            >
+                <Pulse size={12} />
+            </button>
+            <button 
                 className={`btn ${configOpen ? 'bg-blue-100 border-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.2)]' : ''}`}
                 onClick={() => setConfigOpen(!configOpen)}
                 title="IPDA Logic System (λ-Kernel)"
@@ -1138,6 +1148,110 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           {viewMode === 'heatmap' && (
             <div className="flex-1 min-h-0 bg-[#0d0d0f] relative overflow-y-auto">
                 <AssetKineticMatrix symbol="BTCUSDT" sentimentData={alignmentData} />
+            </div>
+          )}
+
+          {viewMode === 'forensics' && (
+            <div className="flex-1 min-h-0 bg-[#0d0d0f] p-8 flex flex-col gap-8 overflow-y-auto font-mono">
+                <div className="grid grid-cols-2 gap-8">
+                    {/* Market Rhythm Plugin Output */}
+                    <div className="bg-zinc-900/40 border border-white/5 p-6 rounded-lg relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-2 opacity-20"><Pulse size={48} className="text-blue-500" /></div>
+                        <h2 className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 font-black mb-6">Plugin: Market_Rhythm.exe</h2>
+                        
+                        <div className="space-y-6">
+                            <div className="flex justify-between items-end border-b border-white/5 pb-4">
+                                <span className="text-[11px] text-zinc-400 font-bold uppercase">Tempo index</span>
+                                <span className="text-2xl font-black text-blue-400 italic tabular-nums">{result?.rhythm?.tempo_bpm || '0.00'}<span className="text-xs ml-1 font-normal opacity-50">BPM</span></span>
+                            </div>
+                            <div className="flex justify-between items-end border-b border-white/5 pb-4">
+                                <span className="text-[11px] text-zinc-400 font-bold uppercase">Beat consistency</span>
+                                <span className="text-2xl font-black text-zinc-200 tabular-nums">{result?.rhythm?.beat_count || 0}</span>
+                            </div>
+                            <div className="flex justify-between items-end">
+                                <span className="text-[11px] text-zinc-400 font-bold uppercase">Harmonic phase</span>
+                                <span className={`text-[11px] font-black uppercase ${result?.rhythm?.is_harmonic ? 'text-emerald-500' : 'text-red-500'}`}>
+                                    {result?.rhythm?.status || 'SYNCHRONIZING...'}
+                                </span>
+                            </div>
+                            <div className="mt-8 p-4 bg-zinc-950/60 border border-white/5 rounded">
+                                <div className="text-[9px] text-zinc-600 font-black uppercase mb-2 tracking-widest">Acoustic Fingerprint</div>
+                                <div className="font-mono text-[9px] text-blue-500/80 break-all leading-tight tracking-[0.2em]">{result?.rhythm?.fingerprint || 'GENERATING_HASH_STREAM...'}</div>
+                                {result?.rhythm?.pattern_repeat && (
+                                    <div className="mt-2 text-[9px] text-emerald-500 font-black animate-pulse uppercase">CYCLICAL_PATTERN_DETECTED [λ3 REPEAT]</div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Market Seismology Plugin Output */}
+                    <div className="bg-zinc-900/40 border border-white/5 p-6 rounded-lg relative overflow-hidden group">
+                        <div className="absolute top-0 right-0 p-2 opacity-20"><Zap size={48} className="text-emerald-500" /></div>
+                        <h2 className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 font-black mb-6">Plugin: Market_Seismology.exe</h2>
+
+                        <div className="space-y-6">
+                            <div className="flex justify-between items-end border-b border-white/5 pb-4">
+                                <span className="text-[11px] text-zinc-400 font-bold uppercase">Seismic Event</span>
+                                <span className={`text-2xl font-black italic tracking-tighter ${result?.seismology?.is_epicenter ? 'text-emerald-400 animate-pulse' : 'text-zinc-200'}`}>
+                                    {result?.seismology?.event_type || 'NOMINAL'}
+                                </span>
+                            </div>
+                            <div className="flex justify-between items-end border-b border-white/5 pb-4">
+                                <span className="text-[11px] text-zinc-400 font-bold uppercase">Mag. normal (ATR)</span>
+                                <span className="text-2xl font-black text-emerald-500 tabular-nums italic">M_{result?.seismology?.magnitude || '0.00'}</span>
+                            </div>
+                            <div className="flex justify-between items-center bg-zinc-950/40 p-4 border border-white/5">
+                                <div className="flex flex-col">
+                                    <span className="text-[9px] text-zinc-500 font-black uppercase mb-1">Waveform Analysis</span>
+                                    <div className="flex gap-2">
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_p_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>P-WAVE</div>
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_s_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>S-WAVE</div>
+                                    </div>
+                                </div>
+                                <div className="text-right">
+                                    <div className="text-[9px] text-zinc-600 font-black uppercase mb-1">Shock Intensity</div>
+                                    <div className="h-1.5 w-24 bg-zinc-800 rounded-full overflow-hidden">
+                                        <div className="h-full bg-emerald-500" style={{ width: `${(result?.seismology?.magnitude || 0) * 100}%` }} />
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="mt-4 flex items-center gap-2">
+                                <div className={`w-2 h-2 rounded-full ${result?.seismology?.is_epicenter ? 'bg-emerald-500 animate-ping' : 'bg-zinc-800'}`} />
+                                <span className="text-[10px] text-zinc-400 font-black uppercase tracking-widest">{result?.seismology?.status || 'MONITORING_CRUST...'}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                {/* Advanced Lambda Fusion Matrix */}
+                <div className="flex-1 bg-zinc-900/20 border border-white/5 p-6 rounded-lg relative">
+                     <h2 className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 font-black mb-6">Module: Sovereign_Fusion_OBNFE.sys</h2>
+                     <div className="grid grid-cols-4 gap-4">
+                         {result?.fusion && Object.entries(result.fusion.weights).map(([key, weight], i) => (
+                             <div key={key} className="p-4 bg-zinc-950/40 border border-white/5">
+                                 <div className="text-[9px] text-zinc-600 font-bold uppercase mb-2">{key.replace('_', ' ')}</div>
+                                 <div className="flex justify-between items-end">
+                                     <span className="text-xl font-black text-zinc-200 italic">×{(weight as number).toFixed(2)}</span>
+                                     <span className="text-[9px] text-blue-500 font-black">L{(i+1)*2}</span>
+                                 </div>
+                             </div>
+                         ))}
+                     </div>
+                     <div className="mt-8 flex justify-between items-center border-t border-white/5 pt-8">
+                         <div>
+                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Fused Confidence Vector</div>
+                             <div className="text-5xl font-black italic tracking-tighter text-blue-500 tabular-nums">
+                                 {((result?.fusion?.confidence || 0) * 100).toFixed(1)}%
+                             </div>
+                         </div>
+                         <div className="text-right">
+                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Convergence Regime</div>
+                             <div className={`text-2xl font-black italic tracking-tight ${result?.fusion?.regime === 'SINCERE' ? 'text-emerald-500' : 'text-zinc-500'}`}>
+                                 {result?.fusion?.regime || 'IDLE'}
+                             </div>
+                         </div>
+                     </div>
+                </div>
             </div>
           )}
 
