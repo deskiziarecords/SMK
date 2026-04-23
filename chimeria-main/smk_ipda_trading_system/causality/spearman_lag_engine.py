@@ -1,8 +1,8 @@
-"""
-numpy: Vectorized ranking and matrix operations.
-pandas: Management of time-series dataframes for shifted lag analysis.
-scipy.stats: Core Spearman rank-order correlation implementation.
-dataclasses: For structured causal telemetry.
+ """
+ numpy: Vectorized ranking and matrix operations.
+    pandas: Management of time-series dataframes for shifted lag analysis.
+    scipy.stats: Core Spearman rank-order correlation implementation.
+    dataclasses: For structured causal telemetry.
 """
 import numpy as np
 import pandas as pd
@@ -79,3 +79,4 @@ class SpearmanLagEngine:
             is_significant=is_sig,
             status=status
         )
+

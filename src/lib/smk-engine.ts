@@ -69,16 +69,22 @@ export class SMKEngine {
   private referenceDistribution: number[] | null = null;
   private disabledModules: Set<string> = new Set();
   private lastResult: SMKResult | null = null;
+  private macroState = { regime: 'NEUTRAL', lambdaScore: 0.72, dxyTrend: 'flat' };
+  private params = {
+    delta_threshold: 0.7,
+    k_multiplier: 1.2,
+    decay_constant: 0.08,
+    regime_persistence: 0.90,
+    weights: [0.35, 0.25, 0.20, 0.15, 0.05]
+  };
   
   // Bayesian Fusion Weights (OBNFE Initial State)
   private lambdaWeights: Record<string, number> = {
-    'λ1_vol_decay': 0.18,
-    'λ2_session': 0.12,
-    'λ3_harmonic': 0.15,
-    'λ4_manipulation': 0.14,
-    'λ5_displacement': 0.16,
-    'λ6_bias': 0.13,
-    'λ7_regime': 0.12,
+    'λ1_vol_decay': 0.35,
+    'λ5_displacement': 0.25,
+    'λ7_regime': 0.20,
+    'λ4_manipulation': 0.15,
+    'λ3_harmonic': 0.05,
   };
 
   constructor() {}
@@ -109,6 +115,20 @@ export class SMKEngine {
 
   public setDisabledModules(modules: string[]) {
     this.disabledModules = new Set(modules);
+  }
+
+  public setMacroState(state: any) {
+    this.macroState = { ...this.macroState, ...state };
+  }
+
+  public updateParams(newParams: any) {
+    this.params = { ...this.params, ...newParams };
+    // Synchronize lambdaWeights with params.weights
+    this.lambdaWeights['λ1_vol_decay'] = this.params.weights[0];
+    this.lambdaWeights['λ5_displacement'] = this.params.weights[1];
+    this.lambdaWeights['λ7_regime'] = this.params.weights[2];
+    this.lambdaWeights['λ4_manipulation'] = this.params.weights[3];
+    this.lambdaWeights['λ3_harmonic'] = this.params.weights[4];
   }
 
   public getSnapshot(n = 60): SMKResult[] {
@@ -174,8 +194,8 @@ export class SMKEngine {
     const volDecay = this.disabledModules.has('vol_decay') ? { ratio: 1, entrapped: false, energy: 0, stasis: 0, status: 'OFF' } : this.calcVolDecay(closes, highs, lows);
     const displacement = this.disabledModules.has('displacement') ? { is_disp: false, dir: 0, body_ratio: 0, vetoed: false, status: 'OFF' } : this.calcDisplacement(currentBar, window);
     const harmonic = this.disabledModules.has('harmonic') ? { phase_diff: 0, inverted: false, trap: 'NONE', status: 'OFF' } : this.calcHarmonic(closes);
-    const manipulation = this.disabledModules.has('manipulation') ? { active: false, score: 0, level: 'NONE', wick: 0, status: 'OFF' } : this.calcManipulation(currentBar, dealingRange, volumes);
-    const expansion = this.disabledModules.has('expansion') ? { prob: 0, entrapped: false, target: 0, status: 'OFF' } : this.calcExpansion(volDecay, dealingRange);
+    const manipulation = this.disabledModules.has('manipulation') ? { active: false, score: 0, level: 'NONE', wick: 0, status: 'OFF' } : this.calcManipulation(currentBar, dealingRange, volumes, session);
+    const expansion = this.disabledModules.has('expansion') ? { prob: 0, entrapped: false, target: 0, status: 'OFF' } : this.calcExpansion(volDecay, dealingRange, session);
     const kl = this.disabledModules.has('kl') ? { score: 0, stable: true, status: 'OFF' } : this.calcKL(closes);
     const topology = this.disabledModules.has('topology') ? { h1_score: 0, fractured: false, islands: 0, status: 'OFF' } : this.calcTopology(closes, volumes);
 
@@ -392,7 +412,7 @@ export class SMKEngine {
     const atr = ss.mean(ranges.slice(-20)) || 0.0001;
     
     const ratio = vt / atr;
-    const entrapped = ratio < 0.7;
+    const entrapped = ratio < this.params.delta_threshold;
     
     if (entrapped) this.stasisTimer++;
     else this.stasisTimer = 0;
@@ -416,7 +436,7 @@ export class SMKEngine {
     const atrRanges = window.map(b => b.high - b.low);
     const atr = ss.mean(atrRanges.slice(-20)) || 0.0001;
     
-    const isDisp = range > (1.2 * atr) && bodyRatio > 0.7;
+    const isDisp = range > (this.params.k_multiplier * atr) && bodyRatio > 0.7;
     
     return {
       is_disp: isDisp,
@@ -463,9 +483,23 @@ export class SMKEngine {
     };
   }
 
-  private calcExpansion(vd: any, dr: any) {
-    const pPersistence = Math.min(1.0, vd.stasis / 10); // Faster buildup
-    const prob = 0.5 * pPersistence + (vd.entrapped ? 0.3 : 0); 
+  private calcExpansion(vd: any, dr: any, session: any) {
+    const pPersistence = Math.min(1.0, vd.stasis / 10); 
+    
+    // Macro Sentiment Fusion (λ7 Integration)
+    const newsInterrupt = this.macroState.regime !== 'NEUTRAL' || Math.abs(this.macroState.lambdaScore - 0.72) > 0.1;
+    let prob = 0.5 * pPersistence + (vd.entrapped ? 0.3 : 0); 
+    
+    if (newsInterrupt) {
+      // Boost probability during session killzones when macro is aligned
+      const sessionBoost = session.killzone ? 0.2 : 0.1;
+      prob = Math.min(1.0, prob + sessionBoost);
+    }
+
+    // Temporal Decay Scaling
+    const decayFactor = Math.exp(-this.params.decay_constant * 5);
+    prob *= decayFactor;
+
     return {
       prob,
       entrapped: vd.entrapped,
@@ -474,40 +508,43 @@ export class SMKEngine {
     };
   }
 
-  private calcManipulation(bar: OHLCV, dr: any, volumes: number[]) {
+  private calcManipulation(bar: OHLCV, dr: any, volumes: number[], session: any) {
     const body = Math.abs(bar.close - bar.open);
+    const range = bar.high - bar.low || 0.0001;
     const upperWick = bar.high - Math.max(bar.open, bar.close);
     const lowerWick = Math.min(bar.open, bar.close) - bar.low;
     const wick = upperWick + lowerWick;
     const wickRatio = wick / (body + 1e-9);
     
-    const avgVol = ss.mean(volumes.slice(0, -1)); // Use previous average
-    
-    // A sweep should be compared against a level that existed BEFORE this bar
-    // However dr high/low currently includes current bar. 
-    // We'll rely on the score being high enough.
+    const avgVol = ss.mean(volumes.slice(0, -1)) || 1;
     
     let score = 0;
-    const pips = (bar.high - bar.low) * 10000;
+    const pips = range * 10000;
     
-    // 1. Must have significant wick
-    if (wickRatio > 4.0) score += 40;
-    else if (wickRatio > 2.5) score += 20;
+    // 1. Structural Killzone Check (Judas usually occurs in first 2 hours of London/NY)
+    if (session.killzone) score += 30;
 
-    // 2. Must have anomalous volume
-    if (bar.volume > (avgVol * 4.5)) score += 40;
-    else if (bar.volume > (avgVol * 2.5)) score += 20;
+    // 2. Wick Rejection Logic
+    if (wickRatio > 3.0) score += 30;
+    else if (wickRatio > 1.5) score += 15;
 
-    // 3. Size of move
-    if (pips > 30) score += 20;
+    // 3. Anomalous Volume (Institutional Pulse)
+    if (bar.volume > (avgVol * 2.0)) score += 30;
+    
+    // 4. Sweep Logic (Preventing Self-Reference)
+    // We check if the current bar swept the high/low that existed BEFORE it
+    const sweptHigh = bar.high > dr.range_h;
+    const sweptLow = bar.low < dr.range_l;
+    
+    if (sweptHigh || sweptLow) score += 10;
 
-    const active = score >= 80;
+    const active = score >= 70;
     return {
         active,
         score,
-        level: bar.high >= dr.high ? 'H60' : (bar.low <= dr.low ? 'L60' : 'NONE'),
+        level: sweptHigh ? 'H60' : (sweptLow ? 'L60' : 'NONE'),
         wick: wickRatio,
-        status: active ? 'MANIPULATION_DETECTED' : 'STABLE'
+        status: active ? 'JUDAS_SWING_DETECTED' : 'STABLE'
     };
   }
 
@@ -635,13 +672,16 @@ export class SMKEngine {
     const ipdaConf = r.ipda_phase?.confidence || 0.7;
     const pFused = (0.65 * pStructural) + (0.35 * (ipdaConf * 2 - 1));
 
+    // Bayesian Persistence Bonus
+    const finalSignal = pFused * this.params.regime_persistence;
+
     let regime = "NEUTRAL";
     if (vetoReasons.length > 0) regime = "REVERSE_PERIOD";
-    else if (Math.abs(pFused) < 0.25) regime = "LIAR_STATE";
-    else if (Math.abs(pFused) > 0.55 && ipdaConf > 0.75) regime = "SINCERE";
+    else if (Math.abs(finalSignal) < 0.25) regime = "LIAR_STATE";
+    else if (Math.abs(finalSignal) > 0.55 && ipdaConf > 0.75) regime = "SINCERE";
 
     return {
-        p_fused: pFused,
+        p_fused: finalSignal,
         confidence: (ipdaConf + (totalWeight / 0.8)) / 2, // normalized
         regime,
         active_lambdas: Object.keys(signals).filter(k => Math.abs(signals[k].score) > 0.6),

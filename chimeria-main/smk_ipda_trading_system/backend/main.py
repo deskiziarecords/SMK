@@ -16,22 +16,24 @@ app = FastAPI(title="QUIMERIA SMK API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
                    allow_methods=["*"], allow_headers=["*"])
 
-def _sanitize_data(obj):
-    import math
-    if isinstance(obj, float):
-        if math.isnan(obj) or math.isinf(obj):
-            return None
-        return obj
-    if isinstance(obj, dict):
-        return {str(k): _sanitize_data(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_sanitize_data(v) for v in obj]
-    if hasattr(obj, 'item') and callable(getattr(obj, 'item')):
-        return _sanitize_data(obj.item())
-    return obj
+class _SafeEncoder(json.JSONEncoder):
+    def default(self, obj):
+        try:
+            import numpy as np
+            if isinstance(obj, np.generic): return obj.item()
+            if isinstance(obj, np.ndarray): return obj.tolist()
+        except Exception:
+            pass
+        t = type(obj).__name__
+        if t.startswith('int'):    return int(obj)
+        if t.startswith('float'):  return float(obj)
+        if t in ('bool_','bool8'): return bool(obj)
+        try: return float(obj)
+        except Exception: pass
+        return super().default(obj)
 
 def _j(data):
-    return json.dumps(_sanitize_data(data), separators=(',', ':'))
+    return _SafeEncoder(separators=(',', ':')).encode(data)
 
 @app.exception_handler(Exception)
 async def _err(request: Request, exc: Exception):
@@ -189,23 +191,6 @@ def read_log(filename: str, lines: int = 100):
 @app.get("/api/ping")
 def ping():
     return {"status": "ok", "pipeline_ready": _pipeline is not None}
-
-@app.get("/api/snapshot")
-def get_snapshot(limit: int = 100):
-    p = get_pipeline()
-    results = []
-    # Save original cursor
-    orig_cursor = p.cursor
-    p.cursor = 0
-    for _ in range(limit):
-        res = p.step()
-        if res is None: break
-        results.append(res)
-    # Restore cursor
-    p.cursor = orig_cursor
-    # Use safe encoder to handle NaN/Inf
-    from fastapi.responses import Response
-    return Response(content=_j(results), media_type="application/json")
 
 # ── LIVE FEED ENDPOINTS ───────────────────────────────────────────────────────
 @app.post("/api/live/start")

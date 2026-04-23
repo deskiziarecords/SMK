@@ -2,7 +2,11 @@ import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { GoogleGenAI } from "@google/genai";
 import { SMKResult } from './types/smk';
-import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3 } from 'lucide-react';
+import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3, Globe, Settings2 } from 'lucide-react';
+import TradingViewWidget from './components/TradingViewWidget';
+import { QuimeriaTicker } from './components/QuimeriaTicker';
+import AssetKineticMatrix from './components/AssetKineticMatrix';
+import { IPDAParameterController } from './components/IPDAParameterController';
 
 const MODULE_DEFS = [
   {id:'bias',        name:'Bias Detector',       layer:'L1'},
@@ -36,9 +40,14 @@ export default function App() {
 
   const markersRef = useRef<any[]>([]);
   const historicalResultsRef = useRef<Map<number, SMKResult>>(new Map());
-  const lastJudasRef = useRef(false);
 
-  const [isRunning, setIsRunning] = useState(false);
+  const [isRunning, _setIsRunning] = useState(false);
+  const isRunningRef = useRef(false);
+  const setIsRunning = (val: boolean) => {
+    isRunningRef.current = val;
+    _setIsRunning(val);
+  };
+
   const [dataLoaded, setDataLoaded] = useState(false);
   const [source, setSource] = useState('NONE');
   const [wsStatus, setWsStatus] = useState<'LIVE' | 'PAUSED' | 'DISCONNECTED'>('DISCONNECTED');
@@ -47,14 +56,29 @@ export default function App() {
   const [trades, setTrades] = useState<any[]>([]);
   const [history, setHistory] = useState<any[]>([]);
   const [realizedPnl, setRealizedPnl] = useState(0);
+  const [initialBalance, setInitialBalance] = useState(10000);
   const [profitTargetEnabled, setProfitTargetEnabled] = useState(false);
   const [profitTargetPct, setProfitTargetPct] = useState(2); // 2%
   const [lotSize, setLotSize] = useState(0.01);
   const [stopLoss, setStopLoss] = useState(15.0);
   const [takeProfit, setTakeProfit] = useState(30.0);
   const [speed, setSpeed] = useState(300);
+
+  useEffect(() => {
+    if (isRunning) {
+        sendMessage({ action: 'run', speed });
+    }
+  }, [speed]);
+
   const [summary, setSummary] = useState({ wins: 0, losses: 0 });
+  const [balance, setBalance] = useState(10000);
+  const [maxAutoTrades, setMaxAutoTrades] = useState(5);
   const [autoTradeCount, setAutoTradeCount] = useState(0);
+  const [trailingStopEnabled, setTrailingStopEnabled] = useState(false);
+  const [trailingStopDist, setTrailingStopDist] = useState(10); // pips
+  const [pipMultiplier, setPipMultiplier] = useState(1); // For Crypto: 1.0 (1 USD = 1 Pip)
+  const [commissionPerLot, setCommissionPerLot] = useState(0.5); // USD
+  const [spreadPips, setSpreadPips] = useState(2); // Simulated spread
   const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'model', text: string }[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -66,12 +90,24 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
-  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality'>('chart');
+  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality' | 'heatmap'>('chart');
+  const [configOpen, setConfigOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [alignmentData, setAlignmentData] = useState<any[]>([]);
   const [causalGraph, setCausalGraph] = useState<any>(null);
+  const [macroContext, setMacroContext] = useState<any>(null);
   
   const slLineRef = useRef<any>(null);
   const tpLineRef = useRef<any>(null);
+
+  useEffect(() => {
+    if (viewMode === 'heatmap') {
+        fetch('/api/asset/alignment/BTCUSDT')
+            .then(res => res.json())
+            .then(data => setAlignmentData(data))
+            .catch(err => console.error("Alignment Matrix failed:", err));
+    }
+  }, [viewMode]);
 
   const [moduleStates, setModuleStates] = useState<Record<string, boolean>>(
     Object.fromEntries(MODULE_DEFS.map(m => [m.id, true]))
@@ -210,7 +246,8 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
   useEffect(() => {
     let reconnectTimeout: NodeJS.Timeout;
     const connect = () => {
-        const wsUrl = `ws://localhost:8000/ws/stream`;
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}`;
         const ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
@@ -306,13 +343,11 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         }
     }
     if (data.manipulation?.active) {
-        if (!lastJudasRef.current) {
+        const wasActive = result?.manipulation?.active;
+        if (!wasActive) {
             addLog('ev', `JUDAS SWING DETECTED @ ${bar.close.toFixed(5)}`, 'alert');
         }
-        lastJudasRef.current = true;
         markers.push({ time: bar.time as any, position: 'aboveBar', color: '#c05000', shape: 'circle', text: 'JUDAS' });
-    } else {
-        lastJudasRef.current = false;
     }
     if (data.veto?.decision === 'Halt') {
         const lastDecision = result?.veto?.decision;
@@ -323,9 +358,22 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
     // SL/TP Monitor
     trades.forEach(t => {
-        const pips = (t.side === 'buy' ? (bar.close - t.price) : (t.price - bar.close)) * 10000;
-        if (t.sl && pips <= -t.sl) {
-            addLog('tr', `STOP LOSS HIT: ${t.side.toUpperCase()} @ ${bar.close.toFixed(5)}`, 'alert');
+        const pips = (t.side === 'buy' ? (bar.close - t.price) : (t.price - bar.close)) * pipMultiplier;
+        
+        // Trailing Stop logic
+        if (trailingStopEnabled && pips > trailingStopDist + 5) {
+            const newSl = pips - trailingStopDist;
+            if (!t.currentSl || newSl > t.currentSl) {
+                t.currentSl = newSl;
+                addLog('tr', `TRAILING SL ADJUSTED: +${newSl.toFixed(1)}p`, 'info');
+            }
+        }
+
+        const effectiveSl = t.currentSl ? -t.currentSl : -t.sl;
+
+        if (pips <= effectiveSl) {
+            const label = t.currentSl ? 'TRAILING STOP' : 'STOP LOSS';
+            addLog('tr', `${label} HIT: ${t.side.toUpperCase()} @ ${bar.close.toFixed(5)}`, 'alert');
             closeTrade(t.id);
         } else if (t.tp && pips >= t.tp) {
             addLog('tr', `TAKE PROFIT HIT: ${t.side.toUpperCase()} @ ${bar.close.toFixed(5)}`, 'ok');
@@ -344,31 +392,31 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
     // Auto Mode execution
     if (autoMode && (data.execution?.action === 'TRADE' || data.execution?.action === 'PROCEED')) {
-        const hasLong = trades.some(t => t.side === 'buy');
-        const hasShort = trades.some(t => t.side === 'sell');
+        if (autoTradeCount < maxAutoTrades) {
+            const hasLong = trades.some(t => t.side === 'buy');
+            const hasShort = trades.some(t => t.side === 'sell');
 
-        if (autoTradeCount < 4) {
             if (data.execution.direction === 1 && !hasLong) {
                 openTrade('buy', data.execution.stop_loss_price, data.execution.take_profit_price);
-                addLog('tr', `AUTO-BUY [${autoTradeCount + 1}/4]: ${data.execution.reason} -> BUY (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'ok');
                 setAutoTradeCount(prev => prev + 1);
+                addLog('tr', `AEGIS AUTO: BUY (Trade ${autoTradeCount + 1}/${maxAutoTrades})`, 'ok');
             } else if (data.execution.direction === -1 && !hasShort) {
                 openTrade('sell', data.execution.stop_loss_price, data.execution.take_profit_price);
-                addLog('tr', `AUTO-SELL [${autoTradeCount + 1}/4]: ${data.execution.reason} -> SELL (SL: ${data.execution.stop_loss_price.toFixed(5)})`, 'alert');
                 setAutoTradeCount(prev => prev + 1);
+                addLog('tr', `AEGIS AUTO: SELL (Trade ${autoTradeCount + 1}/${maxAutoTrades})`, 'alert');
             }
         } else {
-            // Log once when limit reached
-            if (autoTradeCount === 4) {
-                addLog('vt', 'SESSION LIMIT REACHED: 4 AUTO-TRADES COMPLETED', 'warn');
-                setAutoTradeCount(5); // Prevent repeat logs
+            // Reached limit
+            if (autoTradeCount === maxAutoTrades) {
+                addLog('ev', `AUTO-LIMIT REACHED: ${maxAutoTrades} TRADES`, 'warn');
+                setAutoTradeCount(prev => prev + 1); // increment so it doesn't log every bar
             }
         }
     }
 
     // Price Line Updates (Execution Levels & Active Trades)
-    const activeSL = trades.length > 0 ? trades[0].price - (trades[0].sl / 10000) * (trades[0].side === 'buy' ? 1 : -1) : 0;
-    const activeTP = trades.length > 0 ? trades[0].price + (trades[0].tp / 10000) * (trades[0].side === 'buy' ? 1 : -1) : 0;
+    const activeSL = trades.length > 0 ? trades[0].price - (trades[0].sl / pipMultiplier) * (trades[0].side === 'buy' ? 1 : -1) : 0;
+    const activeTP = trades.length > 0 ? trades[0].price + (trades[0].tp / pipMultiplier) * (trades[0].side === 'buy' ? 1 : -1) : 0;
 
     const showSL = (data.execution?.is_armed && data.execution.stop_loss_price > 0) ? data.execution.stop_loss_price : (trades.length > 0 ? activeSL : 0);
     const showTP = (data.execution?.is_armed && data.execution.take_profit_price > 0) ? data.execution.take_profit_price : (trades.length > 0 ? activeTP : 0);
@@ -425,7 +473,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
     }
 
     // Ensure chart advances
-    if (chartRef.current && isRunning) {
+    if (chartRef.current && isRunningRef.current) {
         chartRef.current.timeScale().scrollToRealTime();
     }
   };
@@ -542,11 +590,11 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       if (sendMessage({ action: 'reset' })) {
           setIsRunning(false);
           setRealizedPnl(0);
+          setBalance(10000);
+          setAutoTradeCount(0);
           setTrades([]);
           setHistory([]);
           setSummary({ wins: 0, losses: 0 });
-          setAutoTradeCount(0);
-          lastJudasRef.current = false;
           markersRef.current = [];
           historicalResultsRef.current.clear();
           candleSeriesRef.current?.setData([]);
@@ -563,8 +611,8 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       const id = Date.now();
       
       // Calculate SL/TP in pips for the monitor, or use defaults
-      const sl = sl_price ? Math.abs(price - sl_price) * 10000 : stopLoss;
-      const tp = tp_price ? Math.abs(price - tp_price) * 10000 : takeProfit;
+      const sl = sl_price ? Math.abs(price - sl_price) * pipMultiplier : stopLoss;
+      const tp = tp_price ? Math.abs(price - tp_price) * pipMultiplier : takeProfit;
 
       setTrades(prev => [...prev, { 
           id, side, price, lots: lotSize, 
@@ -580,18 +628,32 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           if (!trade || !result) return currentTrades;
           
           const currentPrice = result.bar.close;
-          const pips = (trade.side === 'buy' ? (currentPrice - trade.price) : (trade.price - currentPrice)) * 10000;
-          const profit = pips * trade.lots;
+          const pips = (trade.side === 'buy' ? (currentPrice - trade.price) : (trade.price - currentPrice)) * pipMultiplier;
+          const rawProfit = pips * trade.lots;
+          const commission = trade.lots * commissionPerLot;
+          const spreadCost = (spreadPips / pipMultiplier) * trade.lots * 0.0001; // basic spread simulation
+          const profit = rawProfit - commission;
           
           const closedTrade = {
             ...trade,
             closePrice: currentPrice,
             pips,
             profit,
+            commission,
             closedAt: result.bar.time
           };
 
-          setHistory(prev => [closedTrade, ...prev].slice(0, 50));
+          setHistory(prev => {
+              const newHistory = [closedTrade, ...prev].slice(0, 50);
+              // Save to backend /logs
+              fetch('/api/simulator/save-trades', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ trades: newHistory })
+              }).catch(e => console.error("Logger error:", e));
+              return newHistory;
+          });
+          setBalance(prev => prev + profit);
           setRealizedPnl(prev => prev + profit);
           setSummary(prev => ({
               wins: pips > 0 ? prev.wins + 1 : prev.wins,
@@ -604,7 +666,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
   };
 
   const openPnlProfit = result ? trades.reduce((sum, t) => {
-      const p = (t.side === 'buy' ? (result.bar.close - t.price) : (t.price - result.bar.close)) * 10000 * t.lots;
+      const p = (t.side === 'buy' ? (result.bar.close - t.price) : (t.price - result.bar.close)) * pipMultiplier * t.lots;
       return sum + p;
   }, 0) : 0;
 
@@ -627,7 +689,6 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
   const netPnl = realizedPnl + openPnlProfit;
   const winRate = (summary.wins + summary.losses) > 0 ? (summary.wins / (summary.wins + summary.losses) * 100).toFixed(0) + '%' : '--%';
-  const initialBalance = 10000;
   const currentReturnPct = (netPnl / initialBalance) * 100;
 
   useEffect(() => {
@@ -710,6 +771,71 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           <button className="p-1 hover:bg-zinc-100 rounded" onClick={() => setSettingsOpen(false)}><X size={14}/></button>
         </div>
         <div className="mod-list">
+          <div className="p-3 border-b border-zinc-800 mb-2 bg-zinc-900/30">
+            <div className="text-[10px] font-bold text-zinc-500 mb-2 uppercase">Simulator Settings</div>
+            <div className="flex flex-col gap-2">
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-zinc-300">Initial Balance</span>
+                <input 
+                  type="number" 
+                  className="w-24 bg-zinc-800 border border-zinc-700 text-zinc-100 text-[10px] p-1 rounded outline-none focus:border-blue-500" 
+                  value={balance} 
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    setBalance(val);
+                    setInitialBalance(val);
+                  }}
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-zinc-300">Max Auto Trades</span>
+                <input 
+                  type="number" 
+                  className="w-24 bg-zinc-800 border border-zinc-700 text-zinc-100 text-[10px] p-1 rounded outline-none focus:border-blue-500" 
+                  value={maxAutoTrades} 
+                  onChange={e => setMaxAutoTrades(parseInt(e.target.value))}
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-zinc-300">Pip Multiplier</span>
+                <input 
+                  type="number" 
+                  className="w-24 bg-zinc-800 border border-zinc-700 text-zinc-100 text-[10px] p-1 rounded outline-none focus:border-blue-500" 
+                  value={pipMultiplier} 
+                  onChange={e => setPipMultiplier(parseFloat(e.target.value))}
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-zinc-300">Commission ($/Lot)</span>
+                <input 
+                  type="number" 
+                  className="w-24 bg-zinc-800 border border-zinc-700 text-zinc-100 text-[10px] p-1 rounded outline-none focus:border-blue-500" 
+                  value={commissionPerLot} 
+                  onChange={e => setCommissionPerLot(parseFloat(e.target.value))}
+                />
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-zinc-300">Trailing Stop</span>
+                <div className="flex items-center gap-2">
+                    <input 
+                        type="checkbox" 
+                        className="accent-blue-500"
+                        checked={trailingStopEnabled} 
+                        onChange={e => setTrailingStopEnabled(e.target.checked)} 
+                    />
+                    <input 
+                    type="number" 
+                    className="w-16 bg-zinc-800 border border-zinc-700 text-zinc-100 text-[10px] p-1 rounded outline-none focus:border-blue-500 disabled:opacity-50" 
+                    value={trailingStopDist} 
+                    onChange={e => setTrailingStopDist(parseInt(e.target.value))}
+                    disabled={!trailingStopEnabled}
+                    />
+                    <span className="text-[8px] text-zinc-500 font-bold">PIPS</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="text-[10px] font-bold text-zinc-400 px-3 mb-1 uppercase">Analysis Modules</div>
           {MODULE_DEFS.map(m => {
             const on = moduleStates[m.id];
             const col = LAYER_COLORS[m.layer] || '#888';
@@ -767,6 +893,20 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 <Activity size={12} />
             </button>
             <button 
+                className={`btn ${viewMode === 'heatmap' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                onClick={() => setViewMode('heatmap')}
+                title="Kinetic Alignment Matrix"
+            >
+                <LayoutGrid size={12} />
+            </button>
+            <button 
+                className={`btn ${configOpen ? 'bg-blue-100 border-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.2)]' : ''}`}
+                onClick={() => setConfigOpen(!configOpen)}
+                title="IPDA Logic System (λ-Kernel)"
+            >
+                <Settings2 size={12} className={configOpen ? 'text-blue-600' : ''} />
+            </button>
+            <button 
                 className={`btn ${aiOpen ? 'bg-blue-100 border-blue-400' : ''}`}
                 onClick={() => setAiOpen(!aiOpen)}
                 title="AI Core"
@@ -798,7 +938,35 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       <div className="main-content">
         {/* LEFT PANEL */}
         <div className="lp">
-          <div className="phdr">LAMBDA SENSORS</div>
+        <div className="text-[7px] text-zinc-500 font-bold px-2 py-1 uppercase tracking-widest border-b border-zinc-800/50">Sim Account</div>
+        <div className="p-2 border-b border-zinc-800/50">
+          <div className="flex justify-between items-baseline">
+            <div className="text-xs font-mono font-bold text-zinc-300">${balance.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            <div className={`text-[9px] font-mono font-bold ${netPnl >= 0 ? 'text-emerald-500/80' : 'text-rose-500/80'}`}>
+              {netPnl >= 0 ? '+' : ''}{currentReturnPct.toFixed(2)}%
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 mt-1 opacity-60">
+             <div className="flex justify-between items-center text-[7px]">
+                <span className="text-zinc-500 uppercase">W/L:</span>
+                <span className="font-mono text-zinc-300">{winRate}</span>
+             </div>
+             <div className="flex justify-between items-center text-[7px]">
+                <span className="text-zinc-500 uppercase">Pips:</span>
+                <span className={`font-mono ${realizedPnl >= 0 ? 'text-zinc-300' : 'text-rose-400'}`}>{realizedPnl.toFixed(0)}</span>
+             </div>
+             <div className="flex justify-between items-center text-[7px]">
+                <span className="text-zinc-500 uppercase">Auto:</span>
+                <span className="font-mono text-zinc-300">{autoTradeCount}/{maxAutoTrades}</span>
+             </div>
+             <div className="flex justify-between items-center text-[7px]">
+                <span className="text-zinc-500 uppercase">Comm:</span>
+                <span className="font-mono text-rose-500/70">-${(history.reduce((s,t) => s + (t.commission || 0), 0)).toFixed(1)}</span>
+             </div>
+          </div>
+        </div>
+
+      <div className="phdr">LAMBDA SENSORS</div>
           <div className="flex-1 overflow-y-auto">
             {result?.sensors?.map(s => (
               <div key={s.id} className="srow">
@@ -823,6 +991,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
         {/* CENTER COLUMN */}
         <div className="cc">
+          <QuimeriaTicker onUpdate={setMacroContext} />
           <div className="cbar">
             <span className={`cb ${result?.amd?.state === 'Manipulation' ? 'cb-alert' : ''}`}>AMD:{result?.amd?.state.toUpperCase().slice(0,3) || 'ACC'}</span>
             <span className="cb">ZONE:{result?.dealing_range?.zone.toUpperCase().slice(0,4) || '--'}</span>
@@ -964,6 +1133,20 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                     )}
                 </div>
             </div>
+          )}
+
+          {viewMode === 'heatmap' && (
+            <div className="flex-1 min-h-0 bg-[#0d0d0f] relative overflow-y-auto">
+                <AssetKineticMatrix symbol="BTCUSDT" sentimentData={alignmentData} />
+            </div>
+          )}
+
+          {/* Off-canvas Logic Controller */}
+          {configOpen && (
+            <IPDAParameterController 
+                marketContext={macroContext} 
+                onClose={() => setConfigOpen(false)} 
+            />
           )}
 
           <div className="logs">
@@ -1123,7 +1306,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         <button className="btn" onClick={() => setSourceModalOpen(true)}>DATA SOURCE</button>
         <button className="btn" onClick={() => setSettingsOpen(true)}><Settings size={10} className="inline mr-1"/>SETTINGS</button>
         <button className={`btn btn-auto ${autoMode ? 'active' : ''}`} onClick={() => setAutoMode(!autoMode)}>
-          AUTO-TRADE {autoMode ? 'ON' : 'OFF'} ({Math.min(4, autoTradeCount)}/4)
+          AUTO-MODE {autoMode ? 'ON' : 'OFF'}
           <span className={`mcp-pill ${autoMode ? 'active' : ''}`}>MCP_NODE</span>
         </button>
 

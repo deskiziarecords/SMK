@@ -42,32 +42,28 @@ from typing import List, Dict, Optional
 
 # Plugin system — lazy load to avoid circular imports
 _plugin_mgr = None
-_plugin_mgr_attempted = False
 def _get_plugins():
-    global _plugin_mgr, _plugin_mgr_attempted
-    if not _plugin_mgr_attempted:
+    global _plugin_mgr
+    if _plugin_mgr is None:
         try:
             from plugin_manager import get_plugin_manager
             _plugin_mgr = get_plugin_manager()
         except Exception as e:
             print(f"[SMK] Plugin manager not available: {e}")
             _plugin_mgr = None
-        _plugin_mgr_attempted = True
     return _plugin_mgr
 
 # AEGIS bridge — lazy load
 _aegis_bridge = None
-_aegis_bridge_attempted = False
 def _get_bridge():
-    global _aegis_bridge, _aegis_bridge_attempted
-    if not _aegis_bridge_attempted:
+    global _aegis_bridge
+    if _aegis_bridge is None:
         try:
             from aegis_bridge import get_bridge
             _aegis_bridge = get_bridge()
         except Exception as e:
             print(f"[SMK] AEGIS bridge not available: {e}")
             _aegis_bridge = None
-        _aegis_bridge_attempted = True
     return _aegis_bridge
 
 
@@ -247,16 +243,29 @@ class SMKPipeline:
             if bridge:
                 # Feed ATR on every bar regardless of veto
                 bridge.update_atr(cur)
-
-                # Full evaluation (including pattern recognition)
-                exe = bridge.evaluate(r, self.raw_bars[:idx+1])
-                r['execution'] = exe
-
-                # If vetoed, override action but keep the telemetry (pattern, etc.)
-                if r['veto']['decision'] != 'Proceed':
-                    r['execution']['action'] = "HALT"
-                    r['execution']['reason'] = r['veto']['decision']
-                    r['execution']['is_armed'] = False
+                # Only run full evaluation on PROCEED bars
+                if r['veto']['decision'] == 'Proceed':
+                    exe = bridge.evaluate(r, self.raw_bars[:idx+1])
+                    r['execution'] = exe
+                else:
+                    r['execution'] = {
+                        "action": "HALT",
+                        "reason": r['veto']['decision'],
+                        "is_armed": False,
+                        "lot_size": 0.0,
+                        "stop_loss_price": 0.0,
+                        "take_profit_price": 0.0,
+                        "kelly_size": 0.0,
+                        "pattern": "",
+                        "dominant": "X",
+                        "direction": 0,
+                        "venue_allocation": [],
+                        "risk_profile": "",
+                        "risk_pips": 0.0,
+                        "rr_ratio": 0.0,
+                        "delta_e": 0.0,
+                        "rev_score": 0.0,
+                    }
         except Exception as _be:
             r['execution'] = {"action": "HALT", "reason": str(_be), "is_armed": False,
                               "lot_size": 0.0, "stop_loss_price": 0.0,
