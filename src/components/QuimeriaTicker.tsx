@@ -162,8 +162,8 @@ export function QuimeriaTicker({ onUpdate }: { onUpdate?: (data: any) => void })
 
       <style>{`
         .quimeria-ticker {
-          background: #050507;
-          border-bottom: 1px solid #1a1a1f;
+          background: var(--bg1);
+          border-bottom: 1px solid var(--b1);
           display: flex;
           align-items: center;
           height: 26px;
@@ -192,12 +192,12 @@ export function QuimeriaTicker({ onUpdate }: { onUpdate?: (data: any) => void })
           height: 14px;
         }
         .ticker-symbol { font-weight: 800; font-size: 8.5px; opacity: 0.9; }
-        .ticker-price { color: #f0f0f0; font-variant-numeric: tabular-nums; font-weight: 500; }
+        .ticker-price { color: var(--t1); font-variant-numeric: tabular-nums; font-weight: 500; }
         .ticker-change { font-size: 8px; font-weight: 700; padding: 0 4px; border-radius: 1px; }
-        .ticker-change.up { color: #10b981; }
-        .ticker-change.down { color: #ef4444; }
+        .ticker-change.up { color: var(--up); }
+        .ticker-change.down { color: var(--down); }
         .ticker-change.flat { color: #888; }
-        .ticker-lambda { font-size: 7px; color: #555; font-weight: 900; margin-left: 2px; }
+        .ticker-lambda { font-size: 7px; color: var(--t4); font-weight: 900; margin-left: 2px; }
 
         .macro-monitor {
           display: flex;
@@ -205,8 +205,8 @@ export function QuimeriaTicker({ onUpdate }: { onUpdate?: (data: any) => void })
           gap: 8px;
           padding: 0 10px;
           height: 100%;
-          background: #0d0d0f;
-          border-left: 1px solid #1a1a1f;
+          background: var(--bg0);
+          border-left: 1px solid var(--b1);
         }
         .regime-tag {
           font-size: 8px;
@@ -220,13 +220,14 @@ export function QuimeriaTicker({ onUpdate }: { onUpdate?: (data: any) => void })
           display: flex;
           align-items: center;
           gap: 4px;
-          background: #2563eb15;
+          background: var(--ac);
+          background-opacity: 0.05;
           padding: 1px 6px;
           border-radius: 2px;
-          border: 1px solid #2563eb30;
+          border: 1px solid var(--b2);
         }
-        .ls-label { font-size: 8px; color: #2563eb; font-weight: 800; }
-        .ls-val { font-size: 9px; color: #f0f0f0; font-weight: 700; font-variant-numeric: tabular-nums; }
+        .ls-label { font-size: 8px; color: var(--ac); font-weight: 800; }
+        .ls-val { font-size: 9px; color: var(--t1); font-weight: 700; font-variant-numeric: tabular-nums; }
       `}</style>
     </div>
   );

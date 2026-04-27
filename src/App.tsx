@@ -1200,17 +1200,17 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                                 <span className="text-[11px] text-zinc-400 font-bold uppercase">Mag. normal (ATR)</span>
                                 <span className="text-2xl font-black text-emerald-500 tabular-nums italic">M_{result?.seismology?.magnitude || '0.00'}</span>
                             </div>
-                            <div className="flex justify-between items-center bg-zinc-950/40 p-4 border border-white/5">
+                            <div className="flex justify-between items-center bg-slate-50 p-4 border border-slate-200">
                                 <div className="flex flex-col">
-                                    <span className="text-[9px] text-zinc-500 font-black uppercase mb-1">Waveform Analysis</span>
+                                    <span className="text-[9px] text-slate-400 font-black uppercase mb-1">Waveform Analysis</span>
                                     <div className="flex gap-2">
-                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_p_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>P-WAVE</div>
-                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_s_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>S-WAVE</div>
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_p_wave ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>P-WAVE</div>
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_s_wave ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>S-WAVE</div>
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <div className="text-[9px] text-zinc-600 font-black uppercase mb-1">Shock Intensity</div>
-                                    <div className="h-1.5 w-24 bg-zinc-800 rounded-full overflow-hidden">
+                                    <div className="text-[9px] text-slate-400 font-black uppercase mb-1">Shock Intensity</div>
+                                    <div className="h-1.5 w-24 bg-slate-200 rounded-full overflow-hidden">
                                         <div className="h-full bg-emerald-500" style={{ width: `${(result?.seismology?.magnitude || 0) * 100}%` }} />
                                     </div>
                                 </div>
@@ -1224,29 +1224,29 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 </div>
                 
                 {/* Advanced Lambda Fusion Matrix */}
-                <div className="flex-1 bg-zinc-900/20 border border-white/5 p-6 rounded-lg relative">
-                     <h2 className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 font-black mb-6">Module: Sovereign_Fusion_OBNFE.sys</h2>
+                <div className="flex-1 bg-slate-50 border border-slate-200 p-6 rounded-lg relative">
+                     <h2 className="text-[10px] uppercase tracking-[0.3em] text-slate-400 font-black mb-6">Module: Sovereign_Fusion_OBNFE.sys</h2>
                      <div className="grid grid-cols-4 gap-4">
                          {result?.fusion && Object.entries(result.fusion.weights).map(([key, weight], i) => (
-                             <div key={key} className="p-4 bg-zinc-950/40 border border-white/5">
-                                 <div className="text-[9px] text-zinc-600 font-bold uppercase mb-2">{key.replace('_', ' ')}</div>
+                             <div key={key} className="p-4 bg-white border border-slate-100 shadow-sm">
+                                 <div className="text-[9px] text-slate-400 font-bold uppercase mb-2">{key.replace('_', ' ')}</div>
                                  <div className="flex justify-between items-end">
-                                     <span className="text-xl font-black text-zinc-200 italic">×{(weight as number).toFixed(2)}</span>
+                                     <span className="text-xl font-black text-slate-900 italic">×{(weight as number).toFixed(2)}</span>
                                      <span className="text-[9px] text-blue-500 font-black">L{(i+1)*2}</span>
                                  </div>
                              </div>
                          ))}
                      </div>
-                     <div className="mt-8 flex justify-between items-center border-t border-white/5 pt-8">
+                     <div className="mt-8 flex justify-between items-center border-t border-slate-200 pt-8">
                          <div>
-                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Fused Confidence Vector</div>
-                             <div className="text-5xl font-black italic tracking-tighter text-blue-500 tabular-nums">
+                             <div className="text-[10px] text-slate-400 font-black uppercase mb-1">Fused Confidence Vector</div>
+                             <div className="text-5xl font-black italic tracking-tighter text-blue-600 tabular-nums">
                                  {((result?.fusion?.confidence || 0) * 100).toFixed(1)}%
                              </div>
                          </div>
                          <div className="text-right">
-                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Convergence Regime</div>
-                             <div className={`text-2xl font-black italic tracking-tight ${result?.fusion?.regime === 'SINCERE' ? 'text-emerald-500' : 'text-zinc-500'}`}>
+                             <div className="text-[10px] text-slate-400 font-black uppercase mb-1">Convergence Regime</div>
+                             <div className={`text-2xl font-black italic tracking-tight ${result?.fusion?.regime === 'SINCERE' ? 'text-emerald-600' : 'text-slate-400'}`}>
                                  {result?.fusion?.regime || 'IDLE'}
                              </div>
                          </div>
@@ -1424,7 +1424,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           <span className={`mcp-pill ${autoMode ? 'active' : ''}`}>MCP_NODE</span>
         </button>
 
-        <div className="w-[1px] h-4 bg-zinc-200 mx-1" />
+        <div className="w-[1px] h-4 bg-slate-300 mx-1" />
 
         <button className="btn" style={{ borderColor: 'var(--up)', color: 'var(--up)', fontWeight: 700 }} onClick={() => loadData('bitget')}>◉ LIVE</button>
         
@@ -1466,7 +1466,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
               </span>
               <div className="flex items-center gap-2">
                   <span className="text-[8px] opacity-50 uppercase tracking-widest">L4 INTELLIGENCE LAYER</span>
-                  <button onClick={() => setAiOpen(false)} className="p-1 hover:bg-zinc-200 rounded">
+                  <button onClick={() => setAiOpen(false)} className="p-1 hover:bg-slate-200 rounded">
                       <ChevronDown size={14} />
                   </button>
               </div>
@@ -1484,7 +1484,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                   </div>
               ))}
           </div>
-          <form className="ai-chat-form mt-auto bg-[#101014] border-t border-zinc-800" onSubmit={onChatSubmit}>
+          <form className="ai-chat-form mt-auto bg-slate-50 border-t border-slate-200" onSubmit={onChatSubmit}>
               <input 
                   type="text" 
                   value={chatInput} 
