@@ -82,7 +82,7 @@ export class SMKEngine {
   // Bayesian Fusion Weights (OBNFE Initial State)
   private lambdaWeights: Record<string, number> = {
     'λ1_vol_decay': 0.35,
-    'λ5_displacement': 0.25,
+    'λ6_displacement': 0.25,
     'λ7_regime': 0.20,
     'λ4_manipulation': 0.15,
     'λ3_harmonic': 0.05,
@@ -106,6 +106,15 @@ export class SMKEngine {
     }
   }
 
+  public addBar(bar: OHLCV) {
+    // Check for duplicate time
+    if (this.rawBars.length > 0 && bar.time <= this.rawBars[this.rawBars.length - 1].time) {
+      this.rawBars[this.rawBars.length - 1] = bar;
+      return;
+    }
+    this.rawBars.push(bar);
+  }
+
   public reset() {
     this.cursor = 0;
     this.amdState = 'Accumulation';
@@ -124,9 +133,9 @@ export class SMKEngine {
 
   public updateParams(newParams: any) {
     this.params = { ...this.params, ...newParams };
-    // Synchronize lambdaWeights with params.weights
+    // Synchronize lambdaWeights with params.weights (λ1, λ6, λ7, λ4, λ3)
     this.lambdaWeights['λ1_vol_decay'] = this.params.weights[0];
-    this.lambdaWeights['λ5_displacement'] = this.params.weights[1];
+    this.lambdaWeights['λ6_displacement'] = this.params.weights[1];
     this.lambdaWeights['λ7_regime'] = this.params.weights[2];
     this.lambdaWeights['λ4_manipulation'] = this.params.weights[3];
     this.lambdaWeights['λ3_harmonic'] = this.params.weights[4];
@@ -717,66 +726,100 @@ export class SMKEngine {
   }
 
   private fuseSignals(r: SMKResult) {
+    const calculatePrecision = (conf: number) => {
+        /**
+         * Bayesian Precision Mapping:
+         * We treat each sensor as an estimate with a variance proportional to (1-conf).
+         * Precision = 1/Variance. We use a non-linear scaling to strongly favor
+         * high-confidence signals and virtually eliminate noise from low-confidence signals.
+         * 
+         * As conf -> 1, precision -> infinity (clamped at 200).
+         * As conf -> 0, precision -> 0.
+         */
+        const alpha = 3.0; // Sharpness of the confidence curve
+        const epsilon = 0.04; // Noise floor for variance
+        return Math.pow(conf, alpha) / (Math.pow(1.05 - conf, 2) + epsilon);
+    };
+
     const signals: Record<string, { score: number, confidence: number, veto: boolean }> = {
         'λ1_vol_decay': {
-            score: r.vol_decay?.entrapped ? 0.9 : 0.2,
-            confidence: Math.min(1.0, (r.vol_decay?.energy || 0) / 50),
+            score: r.vol_decay?.entrapped ? 0.95 : 0.05,
+            confidence: Math.min(1.0, (r.vol_decay?.energy || 0) / 45 + 0.1),
             veto: false
         },
         'λ3_harmonic': {
-            score: r.harmonic?.inverted ? -1.0 : 0.4,
-            confidence: 0.75,
+            score: r.harmonic?.inverted ? -1.0 : 0.65,
+            confidence: 0.82,
             veto: r.harmonic?.inverted || false
         },
         'λ4_manipulation': {
-            score: r.manipulation?.active ? 0.8 : -0.3,
-            confidence: (r.manipulation?.score || 0) / 100,
-            veto: r.manipulation?.active || false
-        },
-        'λ5_displacement': {
-            score: r.displacement?.dir || 0,
-            confidence: r.displacement?.is_disp ? 0.85 : 0.5,
-            veto: r.displacement?.vetoed || false
-        },
-        'λ6_bias': {
-            score: r.bias?.bias === 'BULLISH' ? 1.0 : (r.bias?.bias === 'BEARISH' ? -1.0 : 0),
-            confidence: r.bias?.coherence || 0.6,
+            score: r.manipulation?.active ? 0.92 : -0.15,
+            confidence: Math.min(1.0, (r.manipulation?.score || 0) / 100),
             veto: false
         },
+        'λ6_displacement': {
+            score: r.displacement?.dir || 0,
+            confidence: r.displacement?.is_disp ? 0.98 : 0.25,
+            veto: r.displacement?.vetoed || false
+        },
+        'λ7_regime': {
+            score: r.kl?.stable ? 0.75 : -0.95,
+            confidence: Math.max(0, 1.0 - (r.kl?.score || 0) / 1.5),
+            veto: !r.kl?.stable && (r.kl?.score || 0) > 1.35
+        },
+        'λ_bias': {
+            score: r.bias?.bias === 'BULLISH' ? 1.0 : (r.bias?.bias === 'BEARISH' ? -1.0 : 0),
+            confidence: (r.bias?.coherence || 0.6) * 0.9,
+            veto: false
+        }
     };
 
     let weightedSum = 0;
-    let totalWeight = 0;
+    let totalPrecision = 0;
     const vetoReasons: string[] = [];
+    const internalWeights: Record<string, number> = {};
     
     for (const [key, sig] of Object.entries(signals)) {
-        const w = this.lambdaWeights[key] || 0.1;
-        const effW = w * sig.confidence;
-        weightedSum += sig.score * effW;
-        totalWeight += effW;
+        const baseW = this.lambdaWeights[key] || 0.12; // λ_bias defaults to 0.12
+        const precision = calculatePrecision(sig.confidence);
+        const effectiveWeight = baseW * precision;
+        
+        weightedSum += sig.score * effectiveWeight;
+        totalPrecision += effectiveWeight;
+        internalWeights[key] = Number(effectiveWeight.toFixed(4));
+        
         if (sig.veto) vetoReasons.push(key);
     }
 
-    const pStructural = totalWeight > 0 ? weightedSum / totalWeight : 0;
-    const ipdaConf = r.ipda_phase?.confidence || 0.7;
-    const pFused = (0.65 * pStructural) + (0.35 * (ipdaConf * 2 - 1));
+    // Bayesian estimate of structural probability (P_structural)
+    const pStructural = totalPrecision > 0 ? weightedSum / totalPrecision : 0;
+    const ipdaConf = r.ipda_phase?.confidence || 0.72;
+    
+    /**
+     * Final Fusion (P_fused):
+     * Mixes structural signal with IPDA Phase confidence.
+     * Higher weight given to sensors if total precision is high.
+     */
+    const structuralMix = Math.min(0.85, 0.5 + (totalPrecision / 100)); // Dynamic mix
+    const pFused = (structuralMix * pStructural) + ((1 - structuralMix) * (ipdaConf * 2 - 1));
 
-    // Bayesian Persistence Bonus
+    // OBNFE Regime Persistence (Markov-style decay)
     const finalSignal = pFused * this.params.regime_persistence;
 
     let regime = "NEUTRAL";
     if (vetoReasons.length > 0) regime = "REVERSE_PERIOD";
-    else if (Math.abs(finalSignal) < 0.25) regime = "LIAR_STATE";
-    else if (Math.abs(finalSignal) > 0.55 && ipdaConf > 0.75) regime = "SINCERE";
+    else if (Math.abs(finalSignal) < 0.22) regime = "LIAR_STATE";
+    else if (Math.abs(finalSignal) > 0.52 && ipdaConf > 0.68) regime = "SINCERE";
 
     return {
         p_fused: finalSignal,
-        confidence: (ipdaConf + (totalWeight / 0.8)) / 2, // normalized
+        confidence: Math.min(1.0, (ipdaConf * 0.4 + (Math.min(20, totalPrecision) / 20) * 0.6)), 
         regime,
-        active_lambdas: Object.keys(signals).filter(k => Math.abs(signals[k].score) > 0.6),
+        active_lambdas: Object.keys(signals).filter(k => Math.abs(signals[k].score) > 0.55 && signals[k].confidence > 0.45),
         veto_active: vetoReasons.length > 0,
-        weights: this.lambdaWeights,
-        status: regime === "SINCERE" ? "STRONG BIAS - EXECUTION ENABLED" : "INSUFFICIENT CONVERGENCE"
+        weights: internalWeights,
+        status: regime === "SINCERE" ? "STRONG CONVERGENCE - EXECUTION VALID" : 
+                (regime === "REVERSE_PERIOD" ? "VETO TRIGGERED: ADVERSARIAL SIGNAL" : "INSUFFICIENT PROBABILITY DENSITY")
     };
   }
 

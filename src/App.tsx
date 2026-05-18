@@ -1,12 +1,18 @@
+import { motion, AnimatePresence } from 'motion/react';
 import { useEffect, useRef, useState, ChangeEvent, FormEvent } from 'react';
 import { createChart, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { GoogleGenAI } from "@google/genai";
-import { SMKResult } from './types/smk';
-import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3, Globe, Settings2, Activity as Pulse, Zap } from 'lucide-react';
+import { SMKResult, OrderBook } from './types/smk';
+import { ClosedTrade } from './types/trading';
+import { RefreshCw, Play, Square, FastForward, Settings, X, Check, LayoutGrid, BarChart2, MessageSquare, ChevronDown, Activity, BarChart3, Globe, Settings2, Activity as Pulse, Zap, PieChart } from 'lucide-react';
 import TradingViewWidget from './components/TradingViewWidget';
 import { QuimeriaTicker } from './components/QuimeriaTicker';
 import AssetKineticMatrix from './components/AssetKineticMatrix';
 import { IPDAParameterController } from './components/IPDAParameterController';
+import OrderBookDepth from './components/OrderBookDepth';
+import OrderFlowDeltaProfile from './components/OrderFlowDeltaProfile';
+import { PostTradeAnalysis } from './components/PostTradeAnalysis';
+import { generateOrderBook } from './lib/data-utils';
 
 const MODULE_DEFS = [
   {id:'bias',        name:'Bias Detector',       layer:'L1'},
@@ -35,6 +41,8 @@ export default function App() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const buyVolumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
+  const sellVolumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const processBarRef = useRef<any>(null);
 
@@ -90,12 +98,23 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
-  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality' | 'heatmap' | 'forensics'>('chart');
+  const [viewMode, setViewMode] = useState<'chart' | 'matrix' | 'causality' | 'heatmap' | 'forensics' | 'analysis'>('chart');
+  const [liveActive, setLiveActive] = useState(false);
+  const [lastTick, setLastTick] = useState<any>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
+  const [remoteLinked, setRemoteLinked] = useState(false);
+  const [remoteStatus, setRemoteStatus] = useState<'IDLE' | 'CONNECTED' | 'ERROR'>('IDLE');
   const [alignmentData, setAlignmentData] = useState<any[]>([]);
   const [causalGraph, setCausalGraph] = useState<any>(null);
   const [macroContext, setMacroContext] = useState<any>(null);
+  const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
+  const [historicalBars, setHistoricalBars] = useState<any[]>([]);
+  const [bitgetBalance, setBitgetBalance] = useState<any>(null);
+  const [venue, setVenue] = useState<'paper' | 'bitget'>('paper');
+  const [tradeSymbol, setTradeSymbol] = useState('BTCUSDT');
+  const [lpWidth, setLpWidth] = useState(180);
+  const [rpWidth, setRpWidth] = useState(200);
   
   const slLineRef = useRef<any>(null);
   const tpLineRef = useRef<any>(null);
@@ -108,6 +127,20 @@ export default function App() {
             .catch(err => console.error("Alignment Matrix failed:", err));
     }
   }, [viewMode]);
+
+  useEffect(() => {
+    const fetchBalance = () => {
+        fetch('/api/execution/balance')
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === 'ok') setBitgetBalance(data.balance);
+            })
+            .catch(() => {});
+    };
+    fetchBalance();
+    const timer = setInterval(fetchBalance, 10000);
+    return () => clearInterval(timer);
+  }, []);
 
   const [moduleStates, setModuleStates] = useState<Record<string, boolean>>(
     Object.fromEntries(MODULE_DEFS.map(m => [m.id, true]))
@@ -215,6 +248,16 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         priceScaleId: 'vol',
     });
 
+    const buyVolumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'vol',
+    });
+
+    const sellVolumeSeries = chart.addHistogramSeries({
+        priceFormat: { type: 'volume' },
+        priceScaleId: 'vol',
+    });
+
     chart.priceScale('vol').applyOptions({
         scaleMargins: { top: 0.88, bottom: 0 },
     });
@@ -231,6 +274,8 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     volumeSeriesRef.current = volumeSeries;
+    buyVolumeSeriesRef.current = buyVolumeSeries;
+    sellVolumeSeriesRef.current = sellVolumeSeries;
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -272,14 +317,20 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           const msg = JSON.parse(event.data);
           if (msg.type === 'bar') {
             processBarRef.current?.(msg.data);
+          } else if (msg.type === 'tick') {
+            setLastTick(msg.data);
+            // Optional: Update chart with real-time price tick if in live mode
           } else if (msg.type === 'done') {
             setIsRunning(false);
             addLog('ev', 'BACKTEST COMPLETE', 'ok');
           } else if (msg.type === 'reset') {
               candleSeriesRef.current?.setData([]);
               volumeSeriesRef.current?.setData([]);
+              buyVolumeSeriesRef.current?.setData([]);
+              sellVolumeSeriesRef.current?.setData([]);
               setResult(null);
               setLogs([]);
+              setHistoricalBars([]);
               lastProcessedTimeRef.current = 0;
           }
         };
@@ -307,14 +358,74 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       wsRef.current.send(JSON.stringify(msg));
       return true;
     }
-    addLog('ev', 'WS NOT READY', 'alert');
     return false;
+  };
+
+  const toggleLiveFeed = async () => {
+    const newState = !liveActive;
+    setLiveActive(newState);
+    try {
+        await fetch('/api/live/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: newState, symbol: 'BTCUSDT' })
+        });
+        if (newState) {
+            addLog('ev', 'BITGET LIVE INTERFACE ARMED', 'ok');
+            setSource('LIVE:BITGET');
+        } else {
+            addLog('ev', 'LIVE INTERFACE RETURNED TO STASIS', 'warn');
+        }
+    } catch (e) {
+        addLog('ev', 'LIVE LINK ERROR', 'alert');
+    }
+  };
+
+  const toggleRemoteLink = async () => {
+    const newState = !remoteLinked;
+    setRemoteLinked(newState);
+    try {
+        const res = await fetch('/api/remote/toggle', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: newState })
+        });
+        const data = await res.json();
+        setRemoteStatus(data.linked ? 'CONNECTED' : 'IDLE');
+        if (data.linked) {
+            addLog('ev', 'SMK HYPERLINK ESTABLISHED: REMOTE KERNEL SYNCED', 'ok');
+            setSource('REMOTE:QUIMERIA');
+            setIsRunning(false); // Stop local simulation
+        } else {
+            addLog('ev', 'HYPERLINK SEVERED: LOCAL KERNEL RETURNED', 'alert');
+            setSource('LOCAL:SIM');
+        }
+    } catch (e) {
+        setRemoteStatus('ERROR');
+        addLog('ev', 'HYPERLINK FAILURE: UNABLE TO SYNC REMOTE SMK', 'alert');
+    }
   };
 
   const processBar = (data: SMKResult) => {
     const bar = data.bar;
-    const time = Math.floor(Number(bar.time));
+    if (!bar || bar.time === undefined) return;
+
+    // Robust timestamp conversion: ensure it's a number (seconds)
+    let time: number;
+    const rawT = Number(bar.time);
+    if (!isNaN(rawT)) {
+        time = rawT > 9999999999 ? Math.floor(rawT / 1000) : Math.floor(rawT);
+    } else {
+        const d = new Date(bar.time);
+        time = Math.floor(d.getTime() / 1000);
+    }
+
+    if (isNaN(time) || time <= 0) {
+        console.warn("SMK: Invalid timestamp received", bar.time);
+        return;
+    }
     
+    // Strict increasing order for chart.update()
     if (time < lastProcessedTimeRef.current) {
         return;
     }
@@ -322,6 +433,10 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
     setResult(data);
     historicalResultsRef.current.set(time, data);
+    setHistoricalBars(prev => [...prev.slice(-100), bar]);
+    
+    // Generate/Update Order Book
+    setOrderBook(generateOrderBook(bar.close));
 
     candleSeriesRef.current?.update({
       time: time as any,
@@ -330,19 +445,35 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       low: bar.low,
       close: bar.close
     });
+    
+    // Update main volume (faint)
     volumeSeriesRef.current?.update({
       time: time as any,
       value: bar.volume,
-      color: bar.close >= bar.open ? '#237a4522' : '#aa282822'
+      color: bar.close >= bar.open ? '#237a4511' : '#aa282811'
+    });
+
+    // Buy Volume Bars (Green)
+    buyVolumeSeriesRef.current?.update({
+      time: time as any,
+      value: bar.buyVolume || 0,
+      color: '#237a45ee'
+    });
+
+    // Sell Volume Bars (Red)
+    sellVolumeSeriesRef.current?.update({
+      time: time as any,
+      value: bar.sellVolume || 0,
+      color: '#aa2828ee'
     });
 
     const markers: any[] = [];
     if (data.amd?.changed) {
         addLog('ev', `AMD PHASE SHIFT: ${data.amd.prev} → ${data.amd.state}`, 'warn');
         if (data.amd.state === 'Distribution') {
-            markers.push({ time: bar.time as any, position: 'belowBar', color: '#1a6335', shape: 'arrowUp', text: '▲ DIST' });
+            markers.push({ time: time as any, position: 'belowBar', color: '#1a6335', shape: 'arrowUp', text: '▲ DIST' });
         } else if (data.amd.state === 'Retracement') {
-            markers.push({ time: bar.time as any, position: 'aboveBar', color: '#aa2828', shape: 'arrowDown', text: '▼ RET' });
+            markers.push({ time: time as any, position: 'aboveBar', color: '#aa2828', shape: 'arrowDown', text: '▼ RET' });
         }
     }
     if (data.manipulation?.active) {
@@ -350,7 +481,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
         if (!wasActive) {
             addLog('ev', `JUDAS SWING DETECTED @ ${bar.close.toFixed(5)}`, 'alert');
         }
-        markers.push({ time: bar.time as any, position: 'aboveBar', color: '#c05000', shape: 'circle', text: 'JUDAS' });
+        markers.push({ time: time as any, position: 'aboveBar', color: '#c05000', shape: 'circle', text: 'JUDAS' });
     }
     if (data.veto?.decision === 'Halt') {
         const lastDecision = result?.veto?.decision;
@@ -372,13 +503,13 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
             }
         }
 
-        const effectiveSl = t.currentSl ? -t.currentSl : -t.sl;
+        const effectiveSl = t.currentSl ? -t.currentSl : (t.sl > 0 ? -t.sl : null);
 
-        if (pips <= effectiveSl) {
+        if (effectiveSl !== null && pips <= effectiveSl) {
             const label = t.currentSl ? 'TRAILING STOP' : 'STOP LOSS';
             addLog('tr', `${label} HIT: ${t.side.toUpperCase()} @ ${bar.close.toFixed(5)}`, 'alert');
             closeTrade(t.id);
-        } else if (t.tp && pips >= t.tp) {
+        } else if (t.tp > 0 && pips >= t.tp) {
             addLog('tr', `TAKE PROFIT HIT: ${t.side.toUpperCase()} @ ${bar.close.toFixed(5)}`, 'ok');
             closeTrade(t.id);
         }
@@ -471,8 +602,8 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
     }
 
     if (autoMode && data.execution?.action === 'HALT' && trades.length > 0) {
-        setTrades([]);
         addLog('tr', `AUTO-SYSTEM: ${data.execution.reason} -> EMERGENCY LIQUIDATION`, 'alert');
+        setTrades([]);
     }
 
     // Ensure chart advances
@@ -509,19 +640,50 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
             setSource(type.toUpperCase());
             addLog('ev', `LOADED ${data.count} BARS FROM ${data.source}`, 'ok');
             
-            if (data.snapshot && Array.isArray(data.snapshot)) {
+          if (data.snapshot && Array.isArray(data.snapshot)) {
                 const results = data.snapshot;
-                const candleData = results.map((r: any) => r.bar);
-                const volumeData = results.map((r: any) => ({
-                    time: r.bar.time,
-                    value: r.bar.volume,
-                    color: r.bar.close >= r.bar.open ? '#237a4522' : '#aa282822'
+                const candleData = results.map((r: any) => {
+                    let t = r.bar.time;
+                    if (typeof t !== 'number') t = Math.floor(new Date(t).getTime() / 1000);
+                    return { ...r.bar, time: t };
+                }).filter((b: any) => !isNaN(b.time));
+
+                const volumeData = candleData.map((b: any) => ({
+                    time: b.time,
+                    value: b.volume,
+                    color: b.close >= b.open ? '#237a4522' : '#aa282822'
                 }));
+
+                const buyVolumeData = candleData.map((b: any) => ({
+                    time: b.time,
+                    value: b.buyVolume || 0,
+                    color: '#237a4522'
+                }));
+
+                const sellVolumeData = candleData.map((b: any) => ({
+                    time: b.time,
+                    value: b.sellVolume || 0,
+                    color: '#aa282822'
+                }));
+
                 candleSeriesRef.current?.setData(candleData);
                 volumeSeriesRef.current?.setData(volumeData);
-                setResult(results[results.length - 1]);
-                lastProcessedTimeRef.current = Math.floor(Number(results[results.length - 1].bar.time));
-                results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
+                buyVolumeSeriesRef.current?.setData(buyVolumeData);
+                sellVolumeSeriesRef.current?.setData(sellVolumeData);
+
+                if (results.length > 0) {
+                    const lastBar = results[results.length - 1].bar;
+                    let lastT = lastBar.time;
+                    if (typeof lastT !== 'number') lastT = Math.floor(new Date(lastT).getTime() / 1000);
+                    
+                    setResult(results[results.length - 1]);
+                    lastProcessedTimeRef.current = lastT;
+                    results.forEach((r: any) => {
+                        let rt = r.bar.time;
+                        if (typeof rt !== 'number') rt = Math.floor(new Date(rt).getTime() / 1000);
+                        historicalResultsRef.current.set(rt, r);
+                    });
+                }
             }
 
             // Initial view sync
@@ -552,17 +714,34 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
         if (data.snapshot && Array.isArray(data.snapshot)) {
             const results = data.snapshot;
-            const candleData = results.map((r: any) => r.bar);
-            const volumeData = results.map((r: any) => ({
-                time: r.bar.time,
-                value: r.bar.volume,
-                color: r.bar.close >= r.bar.open ? '#237a4522' : '#aa282822'
+            const candleData = results.map((r: any) => {
+                let t = r.bar.time;
+                if (typeof t !== 'number') t = Math.floor(new Date(t).getTime() / 1000);
+                return { ...r.bar, time: t };
+            }).filter((b: any) => !isNaN(b.time));
+
+            const volumeData = candleData.map((b: any) => ({
+                time: b.time,
+                value: b.volume,
+                color: b.close >= b.open ? '#237a4522' : '#aa282822'
             }));
+
             candleSeriesRef.current?.setData(candleData);
             volumeSeriesRef.current?.setData(volumeData);
-            setResult(results[results.length - 1]);
-            lastProcessedTimeRef.current = Math.floor(Number(results[results.length - 1].bar.time));
-            results.forEach((r: any) => historicalResultsRef.current.set(r.bar.time, r));
+            
+            if (results.length > 0) {
+                const lastBar = results[results.length - 1].bar;
+                let lastT = lastBar.time;
+                if (typeof lastT !== 'number') lastT = Math.floor(new Date(lastT).getTime() / 1000);
+
+                setResult(results[results.length - 1]);
+                lastProcessedTimeRef.current = lastT;
+                results.forEach((r: any) => {
+                    let rt = r.bar.time;
+                    if (typeof rt !== 'number') rt = Math.floor(new Date(rt).getTime() / 1000);
+                    historicalResultsRef.current.set(rt, r);
+                });
+            }
             setTimeout(() => {
               chartRef.current?.timeScale().fitContent();
             }, 50);
@@ -608,64 +787,102 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       }
   };
 
-  const openTrade = (side: 'buy' | 'sell', sl_price?: number, tp_price?: number) => {
-      if (!result) return;
-      const price = result.bar.close;
+  const openTrade = async (side: 'buy' | 'sell', sl_price?: number, tp_price?: number) => {
+      const price = lastTick?.price || result?.bar.close;
+      if (!price) {
+          addLog('vt', 'TRADE REJECTED: NO PRICE DATA', 'alert');
+          return;
+      }
+      
       const id = Date.now();
       
       // Calculate SL/TP in pips for the monitor, or use defaults
       const sl = sl_price ? Math.abs(price - sl_price) * pipMultiplier : stopLoss;
       const tp = tp_price ? Math.abs(price - tp_price) * pipMultiplier : takeProfit;
 
+      if (venue === 'bitget' || remoteLinked) {
+          try {
+              const venueType = venue === 'bitget' ? 'bitget' : 'paper';
+              addLog('tr', `TRANSMITTING ${side.toUpperCase()} TO ${venueType.toUpperCase()}...`, 'ok');
+              const res = await fetch('/api/hyperion/order', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                      symbol: tradeSymbol,
+                      side,
+                      lots: lotSize,
+                      price,
+                      venue: venueType,
+                      sl, tp
+                  })
+              });
+              const data = await res.json();
+              if (data.status === 'ok' || data.order_id) {
+                  addLog('tr', `${venueType.toUpperCase()} CONFIRMED: ORDER ${data.order_id || 'QUEUED'}`, 'ok');
+              }
+          } catch (e) {
+              addLog('tr', `HYPERION ERROR: TRANSMISSION FAILED`, 'alert');
+          }
+      }
+
       setTrades(prev => [...prev, { 
           id, side, price, lots: lotSize, 
           sl, tp, 
-          venue: result.execution?.venue_allocation?.[0] || 'DEFAULT'
+          venue: venue.toUpperCase()
       }]);
       addLog('tr', `OPEN ${side.toUpperCase()} ${lotSize} @ ${price.toFixed(5)} [SL:${sl.toFixed(1)} TP:${tp.toFixed(1)}]`, side === 'buy' ? 'ok' : 'alert');
   };
 
-  const closeTrade = (id: number) => {
-      setTrades(currentTrades => {
-          const trade = currentTrades.find(t => t.id === id);
-          if (!trade || !result) return currentTrades;
-          
-          const currentPrice = result.bar.close;
-          const pips = (trade.side === 'buy' ? (currentPrice - trade.price) : (trade.price - currentPrice)) * pipMultiplier;
-          const rawProfit = pips * trade.lots;
-          const commission = trade.lots * commissionPerLot;
-          const spreadCost = (spreadPips / pipMultiplier) * trade.lots * 0.0001; // basic spread simulation
-          const profit = rawProfit - commission;
-          
-          const closedTrade = {
-            ...trade,
-            closePrice: currentPrice,
-            pips,
-            profit,
-            commission,
-            closedAt: result.bar.time
-          };
+  const closeTrade = async (id: number | string) => {
+      const trade = trades.find(t => t.id === id);
+      if (!trade || !result) return;
 
-          setHistory(prev => {
-              const newHistory = [closedTrade, ...prev].slice(0, 50);
-              // Save to backend /logs
-              fetch('/api/simulator/save-trades', {
+      if (venue === 'bitget') {
+          try {
+              await fetch('/api/hyperion/close', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ trades: newHistory })
-              }).catch(e => console.error("Logger error:", e));
-              return newHistory;
-          });
-          setBalance(prev => prev + profit);
-          setRealizedPnl(prev => prev + profit);
-          setSummary(prev => ({
-              wins: pips > 0 ? prev.wins + 1 : prev.wins,
-              losses: pips <= 0 ? prev.losses + 1 : prev.losses
-          }));
-          
-          addLog('tr', `CLOSE ${trade.side.toUpperCase()} @ ${currentPrice.toFixed(5)} | ${pips >= 0 ? '+' : ''}${pips.toFixed(1)}p`, pips >= 0 ? 'ok' : 'alert');
-          return currentTrades.filter(t => t.id !== id);
-      });
+                  body: JSON.stringify({ position_id: id })
+              });
+              addLog('tr', `CLOSED BITGET POS ${id}`, 'ok');
+          } catch (e) {
+              addLog('vt', 'BITGET CLOSE FAILED', 'alert');
+          }
+      }
+      
+      const currentPrice = result.bar.close;
+      const pips = (trade.side === 'buy' ? (currentPrice - trade.price) : (trade.price - currentPrice)) * pipMultiplier;
+      const rawProfit = pips * trade.lots;
+      const commission = trade.lots * commissionPerLot;
+      const profit = rawProfit - commission;
+      
+      const closedTrade = {
+        ...trade,
+        closePrice: currentPrice,
+        pips,
+        profit,
+        commission,
+        closedAt: result.bar.time
+      };
+
+      setHistory(prev => [closedTrade, ...prev].slice(0, 50));
+      setBalance(prev => prev + profit);
+      setRealizedPnl(prev => prev + profit);
+      setSummary(prev => ({
+          wins: pips > 0 ? prev.wins + 1 : prev.wins,
+          losses: pips <= 0 ? prev.losses + 1 : prev.losses
+      }));
+      setTrades(prev => prev.filter(t => t.id !== id));
+      
+      addLog('tr', `CLOSE ${trade.side.toUpperCase()} @ ${currentPrice.toFixed(5)} | ${pips >= 0 ? '+' : ''}${pips.toFixed(1)}p`, pips >= 0 ? 'ok' : 'alert');
+
+      if (venue === 'paper') {
+          fetch('/api/simulator/save-trades', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ trades: [closedTrade] })
+          }).catch(e => console.error("Logger error:", e));
+      }
   };
 
   const openPnlProfit = result ? trades.reduce((sum, t) => {
@@ -701,6 +918,12 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
       trades.forEach(t => closeTrade(t.id));
     }
   }, [currentReturnPct, profitTargetEnabled, profitTargetPct, trades]);
+
+  useEffect(() => {
+    if (trades.length > 0) {
+        console.log("Trades updated:", trades);
+    }
+  }, [trades]);
 
   const toggleModule = (id: string) => {
     setModuleStates(prev => ({ ...prev, [id]: !prev[id] }));
@@ -871,43 +1094,61 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           REGIME:{result?.kl?.stable ? 'STABLE' : 'FRACT'}
         </span>
         <span className="pill p-off">SRC:{source}</span>
+        {bitgetBalance && (
+            <span className="pill p-on border-emerald-500/50 text-emerald-400">
+                BITGET: {parseFloat(bitgetBalance.available).toFixed(2)} {bitgetBalance.coin}
+            </span>
+        )}
         {isRunning && <div className="dot"></div>}
 
         <div className="flex gap-1 ml-2">
             <button 
-                className={`btn ${viewMode === 'chart' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                className={`btn flex items-center gap-1.5 ${viewMode === 'chart' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
                 onClick={() => setViewMode('chart')}
                 title="Chart View"
             >
                 <BarChart2 size={12} />
+                <span className="text-[8px] font-bold">CHART</span>
             </button>
             <button 
-                className={`btn ${viewMode === 'matrix' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                className={`btn flex items-center gap-1.5 ${viewMode === 'matrix' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
                 onClick={() => setViewMode('matrix')}
                 title="Matrix View"
             >
                 <LayoutGrid size={12} />
+                <span className="text-[8px] font-bold">MATRIX</span>
             </button>
             <button 
-                className={`btn ${viewMode === 'causality' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                className={`btn flex items-center gap-1.5 ${viewMode === 'causality' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
                 onClick={() => setViewMode('causality')}
                 title="Causality Manifold"
             >
                 <Activity size={12} />
+                <span className="text-[8px] font-bold">CAUSAL</span>
             </button>
             <button 
-                className={`btn ${viewMode === 'heatmap' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                className={`btn flex items-center gap-1.5 ${viewMode === 'heatmap' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
                 onClick={() => setViewMode('heatmap')}
                 title="Kinetic Alignment Matrix"
             >
                 <LayoutGrid size={12} />
+                <span className="text-[8px] font-bold">KINETIC</span>
             </button>
             <button 
-                className={`btn ${viewMode === 'forensics' ? 'bg-zinc-200 border-zinc-400' : ''}`}
+                className={`btn flex items-center gap-1.5 ${viewMode === 'forensics' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
                 onClick={() => setViewMode('forensics')}
                 title="Market Forensics"
             >
                 <Pulse size={12} />
+                <span className="text-[8px] font-bold">FORENSICS</span>
+            </button>
+            <button 
+                className={`btn flex items-center gap-1.5 ${viewMode === 'analysis' ? 'bg-zinc-200 border-zinc-400 text-zinc-900' : ''}`}
+                onClick={() => setViewMode('analysis')}
+                title="Post-Trade Analysis"
+            >
+                <PieChart size={12} />
+                <span className="text-[8px] font-bold">ANALYSIS</span>
             </button>
             <button 
                 className={`btn ${configOpen ? 'bg-blue-100 border-blue-400 shadow-[0_0_10px_rgba(59,130,246,0.2)]' : ''}`}
@@ -935,10 +1176,35 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
             />
             <span className="text-[10px] text-gray-400 font-mono">AUTO-CLOSE 2%</span>
           </label>
+
+          <div className={`flex items-center gap-2 px-2 py-0.5 border rounded cursor-pointer transition-all mr-2 ${liveActive ? 'border-emerald-500/50 bg-emerald-900/10' : 'border-zinc-800'}`}
+               onClick={toggleLiveFeed}>
+              <Activity className={`w-3 h-3 ${liveActive ? 'text-emerald-400 animate-pulse' : 'text-zinc-500'}`} />
+              <div className="flex flex-col leading-none">
+                  <span className={`text-[8px] font-bold ${liveActive ? 'text-emerald-400' : 'text-zinc-400'}`}>
+                      {liveActive ? 'LIVE_STREAM_ON' : 'LIVE_OFF'}
+                  </span>
+              </div>
+          </div>
+          <div className={`flex items-center gap-2 px-2 py-0.5 border rounded cursor-pointer transition-all mr-2 ${remoteLinked ? 'border-blue-500/50 bg-blue-900/10' : 'border-zinc-800'}`}
+               onClick={toggleRemoteLink}>
+              <Globe className={`w-3 h-3 ${remoteLinked ? 'text-blue-400 animate-pulse' : 'text-zinc-500'}`} />
+              <div className="flex flex-col leading-none">
+                  <span className={`text-[8px] font-bold ${remoteLinked ? 'text-blue-400' : 'text-zinc-400'}`}>
+                      {remoteLinked ? 'REMOTE_SYNC_ON' : 'SYNC_OFFLINE'}
+                  </span>
+              </div>
+          </div>
           <span className={`pill ${wsStatus === 'LIVE' ? 'p-ok' : wsStatus === 'PAUSED' ? 'p-warn' : 'p-alert'} flex items-center gap-1.5`}>
             <div className={`status-dot ${wsStatus === 'LIVE' ? 'sd-live' : wsStatus === 'PAUSED' ? 'sd-paused' : 'sd-off'}`} />
             WS:{wsStatus}
           </span>
+          {lastTick && (
+            <span className="flex items-center gap-1 text-emerald-400 font-bold ml-2">
+                <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping" />
+                {lastTick.price.toFixed(2)}
+            </span>
+          )}
           <span>
             {result ? new Date(result.bar.time * 1000).toISOString().replace('T', ' ').slice(11, 16) + 'Z' : '--:--Z'} | BAR {result?.bar_index || 0}/{result?.total_bars || 0}
           </span>
@@ -947,7 +1213,12 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
 
       <div className="main-content">
         {/* LEFT PANEL */}
-        <div className="lp">
+        <motion.div 
+            initial={{ x: -10, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            className="lp"
+            style={{ width: lpWidth }}
+        >
         <div className="text-[7px] text-zinc-500 font-bold px-2 py-1 uppercase tracking-widest border-b border-zinc-800/50">Sim Account</div>
         <div className="p-2 border-b border-zinc-800/50">
           <div className="flex justify-between items-baseline">
@@ -992,12 +1263,41 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
             ))}
           </div>
           <div className="phdr">CAUSAL LAYER</div>
-          <div className="caur"><span className="cl">GRANGER</span><span>{result?.displacement?.is_disp ? 'CAUSAL' : 'NONE'}</span></div>
-          <div className="caur"><span className="cl">TRANS ENT</span><span>0.434</span></div>
-          <div className="caur"><span className="cl">CCM ρ</span><span>0.493</span></div>
-          <div className="caur"><span className="cl">SPEARMAN τ</span><span>τ=2</span></div>
-          <div className="caur" style={{ borderBottom: 'none' }}><span className="cl">DECAY e^τ</span><span>0.852</span></div>
-        </div>
+          <div className="caur">
+            <span className="cl">GRANGER</span>
+            <span className={result?.causality?.granger?.significant ? 'text-emerald-500 font-bold' : ''}>
+                {result?.causality?.granger?.significant ? `CAUSAL (${result.causality.granger.lead.toUpperCase()})` : 'NONE'}
+            </span>
+          </div>
+          <div className="caur">
+            <span className="cl">TRANS ENT</span>
+            <span>{result?.causality?.transfer?.flow?.toFixed(3) || '--'}</span>
+          </div>
+          <div className="caur">
+            <span className="cl">CCM ρ</span>
+            <span>{result?.causality?.ccm?.rho?.toFixed(3) || '--'}</span>
+          </div>
+          <div className="caur">
+            <span className="cl">SPEARMAN τ</span>
+            <span>τ={result?.causality?.spearman?.lag ?? '--'}</span>
+          </div>
+          <div className="caur" style={{ borderBottom: 'none' }}>
+            <span className="cl">DECAY e^τ</span>
+            <span>{result?.vol_decay?.energy?.toFixed(3) || '0.000'}</span>
+          </div>
+        </motion.div>
+
+        <div 
+          className="w-1 bg-zinc-800/10 hover:bg-blue-500/30 cursor-col-resize transition-colors border-x border-zinc-800/20"
+          onMouseDown={(e) => {
+            const startX = e.clientX;
+            const startW = lpWidth;
+            const move = (me: MouseEvent) => setLpWidth(Math.max(120, Math.min(400, startW + (me.clientX - startX))));
+            const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+            window.addEventListener('mousemove', move);
+            window.addEventListener('mouseup', up);
+          }}
+        />
 
         {/* CENTER COLUMN */}
         <div className="cc">
@@ -1020,12 +1320,13 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
               <span className="no-pos">NO OPEN POSITIONS</span>
             ) : (
               trades.map(t => {
-                const pips = (t.side === 'buy' ? (result!.bar.close - t.price) : (t.price - result!.bar.close)) * 10000;
+                const currentPrice = lastTick?.price || result?.bar.close || t.price;
+                const pips = (t.side === 'buy' ? (currentPrice - t.price) : (t.price - currentPrice)) * pipMultiplier;
                 const profit = pips * t.lots;
                 return (
                   <div key={t.id} className="pos-item">
                     <div className={`pdot ${t.side === 'buy' ? 'pdot-l' : 'pdot-s'}`}></div>
-                    <span className="plbl">{t.side.toUpperCase()}</span>
+                    <span className="plbl font-bold">{t.side.toUpperCase()}</span>
                     <span className="pval">{t.lots}@{t.price.toFixed(5)}</span>
                     <span className={pips >= 0 ? 'pnl-p' : 'pnl-n'}>{pips >= 0 ? '+' : ''}{pips.toFixed(1)}p ({profit >= 0 ? '+' : ''}{profit.toFixed(2)})</span>
                     <button className={`pcls ${closeSignal ? 'close-signal' : ''}`} onClick={() => closeTrade(t.id)}>CLOSE</button>
@@ -1200,17 +1501,17 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                                 <span className="text-[11px] text-zinc-400 font-bold uppercase">Mag. normal (ATR)</span>
                                 <span className="text-2xl font-black text-emerald-500 tabular-nums italic">M_{result?.seismology?.magnitude || '0.00'}</span>
                             </div>
-                            <div className="flex justify-between items-center bg-slate-50 p-4 border border-slate-200">
+                            <div className="flex justify-between items-center bg-zinc-950/40 p-4 border border-white/5">
                                 <div className="flex flex-col">
-                                    <span className="text-[9px] text-slate-400 font-black uppercase mb-1">Waveform Analysis</span>
+                                    <span className="text-[9px] text-zinc-500 font-black uppercase mb-1">Waveform Analysis</span>
                                     <div className="flex gap-2">
-                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_p_wave ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>P-WAVE</div>
-                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_s_wave ? 'bg-emerald-500 text-white' : 'bg-slate-200 text-slate-500'}`}>S-WAVE</div>
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_p_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>P-WAVE</div>
+                                        <div className={`px-2 py-0.5 text-[8px] font-black rounded ${result?.seismology?.has_s_wave ? 'bg-emerald-500 text-black' : 'bg-zinc-800 text-zinc-500'}`}>S-WAVE</div>
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <div className="text-[9px] text-slate-400 font-black uppercase mb-1">Shock Intensity</div>
-                                    <div className="h-1.5 w-24 bg-slate-200 rounded-full overflow-hidden">
+                                    <div className="text-[9px] text-zinc-600 font-black uppercase mb-1">Shock Intensity</div>
+                                    <div className="h-1.5 w-24 bg-zinc-800 rounded-full overflow-hidden">
                                         <div className="h-full bg-emerald-500" style={{ width: `${(result?.seismology?.magnitude || 0) * 100}%` }} />
                                     </div>
                                 </div>
@@ -1224,34 +1525,44 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 </div>
                 
                 {/* Advanced Lambda Fusion Matrix */}
-                <div className="flex-1 bg-slate-50 border border-slate-200 p-6 rounded-lg relative">
-                     <h2 className="text-[10px] uppercase tracking-[0.3em] text-slate-400 font-black mb-6">Module: Sovereign_Fusion_OBNFE.sys</h2>
+                <div className="flex-1 bg-zinc-900/20 border border-white/5 p-6 rounded-lg relative">
+                     <h2 className="text-[10px] uppercase tracking-[0.3em] text-zinc-500 font-black mb-6">Module: Sovereign_Fusion_OBNFE.sys</h2>
                      <div className="grid grid-cols-4 gap-4">
                          {result?.fusion && Object.entries(result.fusion.weights).map(([key, weight], i) => (
-                             <div key={key} className="p-4 bg-white border border-slate-100 shadow-sm">
-                                 <div className="text-[9px] text-slate-400 font-bold uppercase mb-2">{key.replace('_', ' ')}</div>
+                             <div key={key} className="p-4 bg-zinc-950/40 border border-white/5">
+                                 <div className="text-[9px] text-zinc-600 font-bold uppercase mb-2">{key.replace('_', ' ')}</div>
                                  <div className="flex justify-between items-end">
-                                     <span className="text-xl font-black text-slate-900 italic">×{(weight as number).toFixed(2)}</span>
+                                     <span className="text-xl font-black text-zinc-200 italic">×{(weight as number).toFixed(2)}</span>
                                      <span className="text-[9px] text-blue-500 font-black">L{(i+1)*2}</span>
                                  </div>
                              </div>
                          ))}
                      </div>
-                     <div className="mt-8 flex justify-between items-center border-t border-slate-200 pt-8">
+                     <div className="mt-8 flex justify-between items-center border-t border-white/5 pt-8">
                          <div>
-                             <div className="text-[10px] text-slate-400 font-black uppercase mb-1">Fused Confidence Vector</div>
-                             <div className="text-5xl font-black italic tracking-tighter text-blue-600 tabular-nums">
+                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Fused Confidence Vector</div>
+                             <div className="text-5xl font-black italic tracking-tighter text-blue-500 tabular-nums">
                                  {((result?.fusion?.confidence || 0) * 100).toFixed(1)}%
                              </div>
                          </div>
                          <div className="text-right">
-                             <div className="text-[10px] text-slate-400 font-black uppercase mb-1">Convergence Regime</div>
-                             <div className={`text-2xl font-black italic tracking-tight ${result?.fusion?.regime === 'SINCERE' ? 'text-emerald-600' : 'text-slate-400'}`}>
+                             <div className="text-[10px] text-zinc-500 font-black uppercase mb-1">Convergence Regime</div>
+                             <div className={`text-2xl font-black italic tracking-tight ${result?.fusion?.regime === 'SINCERE' ? 'text-emerald-500' : 'text-zinc-500'}`}>
                                  {result?.fusion?.regime || 'IDLE'}
                              </div>
                          </div>
                      </div>
                 </div>
+            </div>
+          )}
+
+          {viewMode === 'analysis' && (
+            <div className="flex-1 min-h-0 bg-zinc-950 overflow-hidden shadow-2xl">
+              <PostTradeAnalysis 
+                history={history} 
+                initialBalance={initialBalance} 
+                onClose={() => setViewMode('chart')} 
+              />
             </div>
           )}
 
@@ -1285,8 +1596,25 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           </div>
         </div>
 
+        <div 
+          className="w-1 bg-zinc-800/10 hover:bg-blue-500/30 cursor-col-resize transition-colors border-x border-zinc-800/20"
+          onMouseDown={(e) => {
+            const startX = e.clientX;
+            const startW = rpWidth;
+            const move = (me: MouseEvent) => setRpWidth(Math.max(120, Math.min(400, startW - (me.clientX - startX))));
+            const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+            window.addEventListener('mousemove', move);
+            window.addEventListener('mouseup', up);
+          }}
+        />
+
         {/* RIGHT PANEL */}
-        <div className="rp">
+        <motion.div 
+            initial={{ x: 10, opacity: 0 }}
+            animate={{ x: 0, opacity: 1 }}
+            className="rp"
+            style={{ width: rpWidth }}
+        >
           <div className="rb">
             <div className="rl">EXECUTION ENGINE</div>
             <div className={`veto-banner mb-2 ${result?.execution?.action === 'HALT' ? 'vb-halt' : result?.execution?.action === 'PROCEED' ? 'vb-proceed' : ''}`}>
@@ -1299,7 +1627,19 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           </div>
 
           <div className="trade-panel">
-            <div className="rl">TRADE SIMULATOR</div>
+            <div className="rl">HYPERION ORDERBOOKING</div>
+            <div className="t-lbl mt-1">SYMBOL</div>
+            <input 
+              type="text" 
+              className="t-input" 
+              value={tradeSymbol} 
+              onChange={e => setTradeSymbol(e.target.value.toUpperCase())}
+            />
+            <div className="t-lbl">VENUE</div>
+            <select className="t-input" value={venue} onChange={e => setVenue(e.target.value as any)}>
+              <option value="paper">HYPERION PAPER (LOCAL)</option>
+              <option value="bitget">BITGET LIVE (EXCHANGE)</option>
+            </select>
             <div className="flex gap-2 mb-2">
               <div className="flex-1">
                 <div className="t-lbl">LOTS</div>
@@ -1312,7 +1652,18 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                 />
               </div>
               <div className="flex-1">
-                <div className="t-lbl">SL (p)</div>
+                <div className="flex justify-between items-center pr-1">
+                    <div className="t-lbl">SL (p)</div>
+                    <span className="text-[7px] text-zinc-500">{stopLoss}p</span>
+                </div>
+                <input 
+                  type="range" 
+                  className="w-full h-1 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-red-500 mb-1" 
+                  min={1}
+                  max={100}
+                  value={stopLoss} 
+                  onChange={e => setStopLoss(parseFloat(e.target.value))}
+                />
                 <input 
                   type="number" 
                   className="t-input" 
@@ -1344,6 +1695,20 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
               <button className={`btn-sell ${sellSignal ? 'signal-active' : ''}`} onClick={() => openTrade('sell')}>▼ SELL</button>
             </div>
             <button className={`btn-ca ${closeSignal ? 'close-signal' : ''}`} onClick={() => setTrades([])}>CLOSE ALL POSITIONS</button>
+          </div>
+
+          <div className="rb">
+            <div className="rl">ORDER BOOK DEPTH</div>
+            <div className="h-[200px]">
+                <OrderBookDepth data={orderBook} />
+            </div>
+          </div>
+
+          <div className="rb">
+            <div className="rl">ORDER FLOW DELTA PROFILE</div>
+            <div className="h-[200px]">
+                <OrderFlowDeltaProfile data={orderBook} />
+            </div>
           </div>
 
           <div className="rb">
@@ -1413,7 +1778,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
              <div className="caur"><span className="cl">V_t/ATR</span><span>{(result?.vol_decay?.ratio || 0).toFixed(4)}</span></div>
              <div className="caur" style={{ borderBottom: 'none' }}><span className="cl">ENTRAP</span><span style={{ color: result?.vol_decay?.entrapped ? 'var(--alert)' : 'var(--t4)' }}>{result?.vol_decay?.entrapped ? 'YES' : 'NO'}</span></div>
           </div>
-        </div>
+        </motion.div>
       </div>
 
       <div className="ctrl">
@@ -1424,7 +1789,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
           <span className={`mcp-pill ${autoMode ? 'active' : ''}`}>MCP_NODE</span>
         </button>
 
-        <div className="w-[1px] h-4 bg-slate-300 mx-1" />
+        <div className="w-[1px] h-4 bg-zinc-200 mx-1" />
 
         <button className="btn" style={{ borderColor: 'var(--up)', color: 'var(--up)', fontWeight: 700 }} onClick={() => loadData('bitget')}>◉ LIVE</button>
         
@@ -1466,7 +1831,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
               </span>
               <div className="flex items-center gap-2">
                   <span className="text-[8px] opacity-50 uppercase tracking-widest">L4 INTELLIGENCE LAYER</span>
-                  <button onClick={() => setAiOpen(false)} className="p-1 hover:bg-slate-200 rounded">
+                  <button onClick={() => setAiOpen(false)} className="p-1 hover:bg-zinc-200 rounded">
                       <ChevronDown size={14} />
                   </button>
               </div>
@@ -1484,7 +1849,7 @@ Execution: ${result.execution?.action} (${result.execution?.reason})
                   </div>
               ))}
           </div>
-          <form className="ai-chat-form mt-auto bg-slate-50 border-t border-slate-200" onSubmit={onChatSubmit}>
+          <form className="ai-chat-form mt-auto bg-[#101014] border-t border-zinc-800" onSubmit={onChatSubmit}>
               <input 
                   type="text" 
                   value={chatInput} 

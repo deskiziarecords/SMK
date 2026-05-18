@@ -5,6 +5,22 @@ export interface OHLCV {
   low: number;
   close: number;
   volume: number;
+  buyVolume?: number;
+  sellVolume?: number;
+  delta?: number;
+}
+
+export interface OrderBookLevel {
+  price: number;
+  volume: number;
+  total?: number;
+  delta?: number;
+}
+
+export interface OrderBook {
+  bids: OrderBookLevel[];
+  asks: OrderBookLevel[];
+  timestamp: number;
 }
 
 export interface SMKResult {

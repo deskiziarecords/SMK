@@ -26,10 +26,153 @@ async function startServer() {
 
   const PORT = 3000;
   const engine = new SMKEngine();
+  const REMOTE_SMK_URL = process.env.SMK_REMOTE_API_URL || 'https://mt.itimbre.com';
+  let remotePollingInterval: NodeJS.Timeout | null = null;
+  let isRemoteLinked = false;
 
   app.use(express.json({ limit: '10mb' }));
 
+  // --- REMOTE LINK HELPER ---
+  const broadcastToAll = (msg: any) => {
+    wss.clients.forEach(client => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify(msg));
+      }
+    });
+  };
+
+  const startRemoteLink = () => {
+    if (remotePollingInterval) return;
+    logServer(`Establishing HyperLink to Remote SMK: ${REMOTE_SMK_URL}`);
+    isRemoteLinked = true;
+    
+    remotePollingInterval = setInterval(async () => {
+      try {
+        const response = await fetch(`${REMOTE_SMK_URL}/api/mcp/snapshot`);
+        if (!response.ok) return;
+        const data: any = await response.json();
+        // The real API returns a snapshot which might be a single result or state
+        if (data && data.bar) {
+          broadcastToAll({ type: 'bar', data: data });
+        }
+      } catch (err) {
+        // Silent fail for polling
+      }
+    }, 1000); // 1s sync
+  };
+
+  const stopRemoteLink = () => {
+    if (remotePollingInterval) {
+      clearInterval(remotePollingInterval);
+      remotePollingInterval = null;
+    }
+    isRemoteLinked = false;
+  };
+
+  // --- BITGET LIVE FEED ---
+  let bitgetWs: WebSocket | null = null;
+  let lastCandleTime = 0;
+  let currentLiveCandle: OHLCV | null = null;
+
+  const startBitgetLive = (symbol: string = 'BTCUSDT') => {
+    if (bitgetWs) bitgetWs.close();
+    logServer(`Opening Bitget Live Feed for ${symbol}...`);
+    
+    // Bitget V2 WebSocket
+    bitgetWs = new WebSocket('wss://ws.bitget.com/v2/ws/public');
+
+    bitgetWs.on('open', () => {
+      const subscribeMsg = {
+        op: 'subscribe',
+        args: [{ instType: 'SPOT', channel: 'ticker', instId: symbol }]
+      };
+      bitgetWs?.send(JSON.stringify(subscribeMsg));
+      broadcastToAll({ type: 'log', data: `BITGET LIVE: Subscribed to ${symbol}` });
+    });
+
+    bitgetWs.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.action === 'snapshot' && msg.data && msg.data[0]) {
+          const tick = msg.data[0];
+          const price = parseFloat(tick.lastPr);
+          const volume = parseFloat(tick.baseVolume);
+          const now = Math.floor(Date.now() / 1000);
+          const candleInterval = 300; // 5 min
+          const candleTime = Math.floor(now / candleInterval) * candleInterval;
+
+          if (candleTime > lastCandleTime) {
+            if (currentLiveCandle) {
+              engine.addBar(currentLiveCandle);
+              const res = engine.step();
+              if (res) broadcastToAll({ type: 'bar', data: res });
+            }
+            lastCandleTime = candleTime;
+            currentLiveCandle = {
+              time: candleTime,
+              open: price,
+              high: price,
+              low: price,
+              close: price,
+              volume: 0
+            };
+          } else if (currentLiveCandle) {
+            currentLiveCandle.close = price;
+            currentLiveCandle.high = Math.max(currentLiveCandle.high, price);
+            currentLiveCandle.low = Math.min(currentLiveCandle.low, price);
+            currentLiveCandle.volume += (volume / 288); // rough approximation of volume per tick if not provided
+            
+            // For live feel, we can step the engine with the current unclosed candle
+            // But we should be careful about state persistence.
+            // Better to just push the tick update to frontend for the chart, 
+            // and only 'step' the SMK engine on candle close or every 10s.
+          }
+          
+          // Throttled heartbeat to UI
+          if (now % 2 === 0) {
+              broadcastToAll({ type: 'tick', data: { price, symbol, time: now } });
+          }
+        }
+      } catch (e) {}
+    });
+
+    bitgetWs.on('error', (e) => logServer(`Bitget WS Error: ${e.message}`));
+    bitgetWs.on('close', () => logServer(`Bitget WS Closed`));
+  };
+
   // --- API ROUTES ---
+  app.get('/api/status', async (req, res) => {
+    try {
+        const remoteRes = await fetch(`${REMOTE_SMK_URL}/api/status`);
+        const remoteData = await remoteRes.json();
+        res.json({
+            local: { status: 'ok', engine: 'active' },
+            remote: remoteData,
+            link: isRemoteLinked ? 'CONNECTED' : 'DISCONNECTED'
+        });
+    } catch (e) {
+        res.json({ local: { status: 'ok' }, remote: 'offline', link: 'DISCONNECTED' });
+    }
+  });
+
+  app.post('/api/remote/toggle', (req, res) => {
+    const { enabled } = req.body;
+    if (enabled) startRemoteLink();
+    else stopRemoteLink();
+    res.json({ status: 'ok', linked: isRemoteLinked });
+  });
+
+  app.post('/api/live/toggle', (req, res) => {
+    const { enabled, symbol } = req.body;
+    if (enabled) {
+      startBitgetLive(symbol || 'BTCUSDT');
+    } else {
+      if (bitgetWs) bitgetWs.close();
+      bitgetWs = null;
+    }
+    res.json({ status: 'ok', live: !!bitgetWs });
+  });
+
   app.post('/api/simulator/save-trades', (req, res) => {
     const { trades } = req.body;
     saveTradeLog(trades);
@@ -166,6 +309,31 @@ async function startServer() {
       res.json({ status: 'ok', disabled: disabled_modules.length });
     } else {
       res.status(400).json({ status: 'error', message: 'Invalid configuration' });
+    }
+  });
+
+  // --- HYPERION PROXY ---
+  app.post('/api/hyperion/order', async (req, res) => {
+    try {
+        const response = await fetch(`${REMOTE_SMK_URL}/api/hyperion/orderbooking/order`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(req.body)
+        });
+        const data = await response.json();
+        res.json(data);
+    } catch (err: any) {
+        res.status(500).json({ status: 'error', message: err.message });
+    }
+  });
+
+  app.get('/api/hyperion/positions', async (req, res) => {
+    try {
+        const response = await fetch(`${REMOTE_SMK_URL}/api/broker/positions`);
+        const data = await response.json();
+        res.json(data);
+    } catch (err: any) {
+        res.status(500).json({ status: 'error', message: err.message });
     }
   });
 

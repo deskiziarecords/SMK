@@ -12,9 +12,57 @@ export function generateSyntheticData(n = 300): OHLCV[] {
         const close = open + (Math.random() - 0.5) * noise + trend;
         const high = Math.max(open, close) + Math.random() * 0.0003;
         const low = Math.min(open, close) - Math.random() * 0.0003;
-        bars.push({ time: t, open, high, low, close, volume: 500 + Math.random() * 500 });
+        const volume = 500 + Math.random() * 500;
+        const buyRatio = close >= open ? 0.5 + Math.random() * 0.3 : 0.2 + Math.random() * 0.3;
+        const buyVolume = volume * buyRatio;
+        const sellVolume = volume - buyVolume;
+        const delta = buyVolume - sellVolume;
+
+        bars.push({ 
+            time: t, 
+            open, 
+            high, 
+            low, 
+            close, 
+            volume, 
+            buyVolume, 
+            sellVolume, 
+            delta 
+        });
         p = close;
         t += 300;
     }
     return bars;
+}
+
+export function generateOrderBook(price: number): any {
+    const bids = [];
+    const asks = [];
+    let bidPrice = price - 0.0001;
+    let askPrice = price + 0.0001;
+    
+    let totalBid = 0;
+    let totalAsk = 0;
+
+    for (let i = 0; i < 10; i++) {
+        const bidVol = 10 + Math.random() * 50;
+        const askVol = 10 + Math.random() * 50;
+        const bidDelta = (Math.random() - 0.5) * bidVol * 0.6;
+        const askDelta = (Math.random() - 0.5) * askVol * 0.6;
+        
+        totalBid += bidVol;
+        totalAsk += askVol;
+        
+        bids.push({ price: bidPrice, volume: bidVol, total: totalBid, delta: bidDelta });
+        asks.push({ price: askPrice, volume: askVol, total: totalAsk, delta: askDelta });
+        
+        bidPrice -= 0.0001;
+        askPrice += 0.0001;
+    }
+
+    return {
+        bids,
+        asks,
+        timestamp: Date.now()
+    };
 }
